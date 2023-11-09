@@ -40,6 +40,11 @@ name does not belong to the range of IPs associated with such domain.
 --
 -- @args list the path to the file with the blacklist. (default: blacklist.csv)
 -- 
+--- Optional arguments
+-- file: ath to the file with the blacklist(blacklist.csv)
+-- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse --script-args file=blacklistfile.csv
+--
+---
 -- @xmloutput
 -- <table key="subject">
 --   <elem key="1.3.6.1.4.1.311.60.2.1.2">Delaware</elem>
@@ -89,9 +94,129 @@ license = "Same as Nmap--See https://nmap.org/book/man-legal.html"
 categories = { "default", "safe", "discovery" }
 dependencies = {"https-redirect"}
 
+local blacklistFile = stdnse.get_script_args('list') or 'blacklist.csv'
+
 portrule = function(host, port)
   return shortport.ssl(host, port) or sslcert.isPortSupported(port) or sslcert.getPrepareTLSWithoutReconnect(port)
 end
+
+-------------------------------------------------------------------------------
+-- Global variables
+-------------------------------------------------------------------------------
+
+-- Define a table to store the blacklist
+local issuerBlacklist = {}
+
+local loadedBlackList = false
+
+-------------------------------------------------------------------------------
+-- ENUM definitions
+-------------------------------------------------------------------------------
+
+CertValidity = {
+  NOT_YET_VALID = 1,
+  EXPIRED = 2,
+  VALID = 3
+}
+
+-- These are the subject/issuer name fields that will be shown, in this order,
+-- without a high verbosity.
+local NON_VERBOSE_FIELDS = { 
+  "commonName",
+  "organizationName",
+  "stateOrProvinceName",
+  "countryName"
+}
+
+-------------------------------------------------------------------------------
+-- UTIL functions
+-------------------------------------------------------------------------------
+
+-- Test to see if the string is UTF-16 and transcode it if possible
+local function maybe_decode(str)
+  -- If length is not even, then return as-is
+  if #str < 2 or #str % 2 == 1 then
+    return str
+  end
+  if str:byte(1) > 0 and str:byte(2) == 0 then
+    -- little-endian UTF-16
+    return unicode.transcode(str, unicode.utf16_dec, unicode.utf8_enc, false, nil)
+  elseif str:byte(1) == 0 and str:byte(2) > 0 then
+    -- big-endian UTF-16
+    return unicode.transcode(str, unicode.utf16_dec, unicode.utf8_enc, true, nil)
+  else
+    return str
+  end
+end
+
+-- Get the common name of a cert part (subject or issuer)
+
+local function extract_names(names)
+  local cName = ""
+  local altName = ""
+  local orgName = ""
+  
+  for _, k in ipairs(NON_VERBOSE_FIELDS) do
+    local v = names[k]
+    if v then
+      if k == "commonName" then
+        cName = maybe_decode(v) or ""
+      end
+      if k == "organizationName" then
+        orgName = maybe_decode(v) or ""
+      end
+      if k == "AlternativeName" then
+        altName = maybe_decode(v) or ""
+      end
+    end
+  end
+
+  return cName, altName, orgName
+end
+
+
+-- Load the blacklist from a file
+function load_blacklist(file)
+  local file_handle = io.open(file, "r")
+  if not file_handle then
+    return false
+  end
+
+  for line in file_handle:lines() do
+    local date, issuer, severity = line:match("([^;]+);([^;]+);([^;]+)")
+    if date and issuer and severity then
+      issuerBlacklist[issuer] = {
+        severity = severity,
+        inclusion_date = date
+      }
+    end
+  end
+
+  file_handle:close()
+  return true
+end
+-- Check if a name is in the blacklist
+function is_issuer_blacklisted(names)
+  local cName, altName, orgName = extract_names(names)
+  return issuerBlacklist[cName] ~= nil or issuerBlacklist[altName] ~= nil or issuerBlacklist[orgName] ~= nil
+end
+
+-- Retrieve inforamtion (date and severity) about the blacklisted name entry
+function get_blacklist_information(names)
+  local cName, altName, orgName = extract_names(names)
+
+  if issuerBlacklist[cName] ~= nil then
+    return issuerBlacklist[cName]
+  elseif issuerBlacklist[altName] ~= nil then
+    return issuerBlacklist[altName]
+  end
+
+  return issuerBlacklist[orgName]
+end
+
+-------------------------------------------------------------------------------
+-- OUTPUT funcitons (based on ssl-cert.nse)
+-------------------------------------------------------------------------------
 
 -- Find the index of a value in an array.
 function table_find(t, value)
@@ -112,28 +237,6 @@ function date_to_string(date)
     return string.format("Can't parse; string is \"%s\"", date)
   else
     return datetime.format_timestamp(date)
-  end
-end
-
--- These are the subject/issuer name fields that will be shown, in this order,
--- without a high verbosity.
-local NON_VERBOSE_FIELDS = { "commonName", "organizationName",
-"stateOrProvinceName", "countryName" }
-
--- Test to see if the string is UTF-16 and transcode it if possible
-local function maybe_decode(str)
-  -- If length is not even, then return as-is
-  if #str < 2 or #str % 2 == 1 then
-    return str
-  end
-  if str:byte(1) > 0 and str:byte(2) == 0 then
-    -- little-endian UTF-16
-    return unicode.transcode(str, unicode.utf16_dec, unicode.utf8_enc, false, nil)
-  elseif str:byte(1) == 0 and str:byte(2) > 0 then
-    -- big-endian UTF-16
-    return unicode.transcode(str, unicode.utf16_dec, unicode.utf8_enc, true, nil)
-  else
-    return str
   end
 end
 
@@ -224,6 +327,81 @@ local function output_tab(cert)
   return o
 end
 
+
+-------------------------------------------------------------------------------
+-- CHECK functions
+-------------------------------------------------------------------------------
+
+local function check_authenticity(cert)
+  -- Check the Issuer field in the server certificate should match the Subject 
+  -- field of the CA certificate
+  
+  -- Check the signature on the server certificate is valid and has been signed
+  -- by the private key of the CA.
+end
+
+-- Check the Validity field to ensure the certificate is still within its valid
+-- date range
+
+local function check_validity(cert)
+  -- Get the current date
+  local current_time = os.time(os.date("!*t"))
+
+  -- Check certificate validity
+  local valid_from = os.time(cert.validity.notBefore)
+  local valid_to = os.time(cert.validity.notAfter)
+ 
+  if current_time < valid_from then
+    return CertValidity.NOT_YET_VALID
+  elseif current_time > valid_to then
+    return CertValidity.EXPIRED
+  end
+
+  return CertValidity.VALID
+end
+
+-- Verify the signature
+function verifySignature(cert, publicKey)
+  local is_verified = openssl.verify(publicKey, cert.pem, cert.sig_algorithm)
+  
+  if is_verified then
+    return true
+  else
+    return false
+  end
+end
+
+local function check_self_signed(cert)
+  -- SubjectName's CN is equal to IssuerName's CN
+  if cert.subject == cert.issuer then
+    -- Check if the subject key can be used to validate the signature
+    is_verified = verifySignature(cert, cert.pubkey)
+    return true, is_verified
+  else
+    return false, false
+  end
+end
+
+-- Check if the certificate's SubjectName or IssuerName (i.e., organization or
+-- common name) 
+-- are found in the blacklist of malicious servers, domains, or CAs.
+
+local function check_blacklisted(names)
+  -- Check if names are found in the blacklist of malicious servers, domains,
+  -- or CAs.
+
+  if is_issuer_blacklisted(names) then
+    local info = get_blacklist_information(names)
+    return true, info
+  end
+
+  return false, nil
+end
+
+local function check_dns(cert)
+  -- Check if the web server IP is the corresponding hostname IP
+end
+
 local function output_str(cert)
   if not have_openssl then
     -- OpenSSL is required to parse the cert, so just dump the PEM
@@ -241,22 +419,18 @@ local function output_str(cert)
     end
   end
 
-  if nmap.verbosity() > 0 then
-    lines[#lines + 1] = "Issuer: " .. stringify_name(cert.issuer)
-  end
+  lines[#lines + 1] = "Issuer: " .. stringify_name(cert.issuer)
 
-  if nmap.verbosity() > 0 then
-    lines[#lines + 1] = "Public Key type: " .. cert.pubkey.type
-    lines[#lines + 1] = "Public Key bits: " .. cert.pubkey.bits
-    lines[#lines + 1] = "Signature Algorithm: " .. cert.sig_algorithm
-  end
+  lines[#lines + 1] = "Public Key type: " .. cert.pubkey.type
+  lines[#lines + 1] = "Public Key bits: " .. cert.pubkey.bits
+  lines[#lines + 1] = "Signature Algorithm: " .. cert.sig_algorithm
 
   lines[#lines + 1] = "Not valid before: " ..
   date_to_string(cert.validity.notBefore)
   lines[#lines + 1] = "Not valid after:  " ..
   date_to_string(cert.validity.notAfter)
 
-  if nmap.verbosity() > 0 then
+  if nmap.verbosity() > 1 then
     lines[#lines + 1] = "MD5:   " .. stdnse.tohex(cert:digest("md5"), { separator = " ", group = 4 })
     lines[#lines + 1] = "SHA-1: " .. stdnse.tohex(cert:digest("sha1"), { separator = " ", group = 4 })
   end
@@ -264,47 +438,64 @@ local function output_str(cert)
   if nmap.verbosity() > 1 then
     lines[#lines + 1] = cert.pem
   end
-  return table.concat(lines, "\n")
-end
 
-local function check_authenticity(cert)
-  -- Check the Issuer field in the server certificate should match the Subject 
-  -- field of the CA certificate
+  -- Security information
+  lines[#lines + 1] = "CERTIFICATE SECURITY WARNINGS"
 
-  -- Check the signature on the server certificate is valid and has been signed 
-  -- by the private key of the CA.
-end
-
--- Check the Validity field to ensure the certificate is still within its valid date range
-local function check_validity(cert)
-  -- Get the current date
-  local current_time = os.time(os.date("!*t"))
-
-  -- Check certificate validity
-  local valid_from = os.time(cert.validity.notBefore)
-  local valid_to = os.time(cert.validity.notAfter)
- 
-  if current_time >= valid_from and current_time <= valid_to then
-    return true
+  local authenticity = check_authenticity(cert)
+  if authenticity then
+    lines[#lines + 1] = "Certificate authenticity failed"
   end
 
-  return false
-end
+  local validity = check_validity(cert)
+  if validity == CertValidity.VALID then
+    lines[#lines + 1] = "Validity: OK"
+  else
+    lines[#lines + 1] = "Certificate not valid"
+    if validity == CertValidity.EXPIRED then
+      lines[#lines + 1] = "Certificate exprired on " .. date_to_string(cert.validity.notAfter)
+    elseif authenticity == CertValidity.NOT_YET_VALID then
+      lines[#lines + 1] = "Certificate not valid before " .. date_to_string(cert.validity.notBefore)
+    end
+  end
 
-local function is_self_signed(cert)
-  -- SubjectName’s CN is equal to IssuerName's CN
 
-  -- Check if the subject key can be used to validate the signature
-end
+  -- Check if the certificate's SubjectName or IssuerName (i.e., organization
+  -- or common name) are found in the blacklist of malicious servers, domains,
+  -- or CAs.
 
--- Check if the certificate’s SubjectName or IssuerName (i.e., organization or common name) 
--- are found in the blacklist of malicious servers, domains, or CAs.
-local function is_blacklisted(cert)
-  -- Check if the certificate’s SubjectName or IssuerName (i.e., organization or common name) are found in the blacklist of malicious servers, domains, or CAs.
-end
+  if loadedBlackList then
+    local cert_is_blacklisted, info = check_blacklisted(cert.subject)
+    if cert_is_blacklisted then
+      lines[#lines + 1] = "Certificate Subject is blacklisted"
+      if info ~= nil then
+        lines[#lines + 1] = "Subject blacklisted on " .. info.inclusion_date .. " with severity " .. info.severity
+      end
+    end
+  
+    local ca_is_blacklisted, info = check_blacklisted(cert.issuer)
+    if ca_is_blacklisted then
+      lines[#lines + 1] = "Certificate CA is blacklisted"
+      if info ~= nil then
+        lines[#lines + 1] = "CA blacklisted on " .. info.inclusion_date .. " with severity " .. info.severity
+      end
 
-local function check_dns(cert)
-  -- Check if the web server IP is the corresponding hostname IP
+    end
+  else
+    lines[#lines + 1] = "Blacklist could not be loaded. Subejct and Issuer cannot were not checked."
+  end
+
+  local is_selfsigned, is_verified = check_self_signed(cert)
+  if is_selfsigned then
+    lines[#lines + 1] = "Certificate is self-signed"
+    if ~is_verified then
+      lines[#lines + 1] = "Certificate cannot be verified"
+    else
+      lines[#lines + 1] = "Certificate verified"
+    end
+  end
+
+  return table.concat(lines, "\n")
 end
 
 action = function(host, port)
@@ -314,6 +505,8 @@ action = function(host, port)
     stdnse.debug1("getCertificate error: %s", cert or "unknown")
     return
   end
+
+  loadedBlackList = load_blacklist(blacklistFile)
 
   return output_tab(cert), output_str(cert)
 end
