@@ -8,6 +8,7 @@ local string = require "string"
 local table = require "table"
 local tls = require "tls"
 local unicode = require "unicode"
+local io = require "io"
 local have_openssl, openssl = pcall(require, "openssl")
 
 description = [[
@@ -41,7 +42,9 @@ name does not belong to the range of IPs associated with such domain.
 -- @args list the path to the file with the blacklist. (default: blacklist.csv)
 -- 
 --- Optional arguments
--- file: ath to the file with the blacklist(blacklist.csv)
+-- file: path to the file with the blacklist (blacklist.csv)
+-- ca: path to the file with the Certifaction Authority certificate (/etc/ssl/certs/cacert.pem)
+
 -- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse --script-args file=blacklistfile.csv
 --
 ---
@@ -61,7 +64,7 @@ name does not belong to the range of IPs associated with such domain.
 --   <elem key="businessCategory">Private Organization</elem>
 -- </table>
 -- <table key="issuer">
---   <elem key="organizationalUnitName">Terms of use at https://www.verisign.com/rpa (c)06</elem>
+--   <elem key="organizationalUnitName">Terms of use at https://www.verisign.com/rpa (c)06</elem>blacklistFile
 --   <elem key="organizationName">VeriSign, Inc.</elem>
 --   <elem key="commonName">VeriSign Class 3 Extended Validation SSL CA</elem>
 --   <elem key="countryName">US</elem>
@@ -95,6 +98,7 @@ categories = { "default", "safe", "discovery" }
 dependencies = {"https-redirect"}
 
 local blacklistFile = stdnse.get_script_args('list') or 'blacklist.csv'
+local caCertPath = stdnse.get_script_args('ca') or '/etc/ssl/certs/cacert.pem'
 
 portrule = function(host, port)
   return shortport.ssl(host, port) or sslcert.isPortSupported(port) or sslcert.getPrepareTLSWithoutReconnect(port)
@@ -116,7 +120,8 @@ local loadedBlackList = false
 CertValidity = {
   NOT_YET_VALID = 1,
   EXPIRED = 2,
-  VALID = 3
+  VALID = 3,
+  SHORT_VALIDITY = 4
 }
 
 -- These are the subject/issuer name fields that will be shown, in this order,
@@ -149,34 +154,22 @@ local function maybe_decode(str)
   end
 end
 
--- Get the common name of a cert part (subject or issuer)
-
-local function extract_names(names)
-  local cName = ""
-  local altName = ""
-  local orgName = ""
-  
-  for _, k in ipairs(NON_VERBOSE_FIELDS) do
-    local v = names[k]
-    if v then
-      if k == "commonName" then
-        cName = maybe_decode(v) or ""
-      end
-      if k == "organizationName" then
-        orgName = maybe_decode(v) or ""
-      end
-      if k == "AlternativeName" then
-        altName = maybe_decode(v) or ""
+-- Extract alternative names from a certificate
+local function extract_alternative_names(cert)
+  local altNames = {}
+  if cert.extensions then
+    for _, ext in ipairs(cert.extensions) do
+      if ext.name == "X509v3 Subject Alternative Name" then
+        table.insert(altNames, ext.value)
       end
     end
   end
 
-  return cName, altName, orgName
+  return altNames
 end
 
-
 -- Load the blacklist from a file
-function load_blacklist(file)
+local function load_blacklist(file)
   local file_handle = io.open(file, "r")
   if not file_handle then
     return false
@@ -196,22 +189,41 @@ function load_blacklist(file)
   return true
 end
 -- Check if a name is in the blacklist
-function is_issuer_blacklisted(names)
-  local cName, altName, orgName = extract_names(names)
-  return issuerBlacklist[cName] ~= nil or issuerBlacklist[altName] ~= nil or issuerBlacklist[orgName] ~= nil
+local function is_issuer_blacklisted(names)
+  if issuerBlacklist[names.commonName] ~= nil then
+    return true
+  elseif issuerBlacklist[names.organizationName] ~= nil then
+    return true
+  end
+
+  for _, altName in ipairs(names.altNames) do
+    if issuerBlacklist[altName] ~= nil then
+      return true
+    end
+  end
+
+  return false
 end
 
 -- Retrieve inforamtion (date and severity) about the blacklisted name entry
-function get_blacklist_information(names)
-  local cName, altName, orgName = extract_names(names)
-
-  if issuerBlacklist[cName] ~= nil then
-    return issuerBlacklist[cName]
-  elseif issuerBlacklist[altName] ~= nil then
-    return issuerBlacklist[altName]
+local function get_blacklist_information(names)
+  if issuerBlacklist[names.commonName] ~= nil then
+    return issuerBlacklist[names.commonName]
+  elseif issuerBlacklist[names.organizationName] ~= nil then
+    return issuerBlacklist[names.organizationName]
   end
 
-  return issuerBlacklist[orgName]
+  for _, altName in ipairs(names.altNames) do
+    if issuerBlacklist[altName] ~= nil then
+      return issuerBlacklist[altName]
+    end
+  end
+
+  return nil
+end
+
+function read_ca_certificate()
+  return sslcert.parse_ssl_certificate(io.open(caCertPath, 'r'):read("*a"))
 end
 
 -------------------------------------------------------------------------------
@@ -327,17 +339,26 @@ local function output_tab(cert)
   return o
 end
 
-
 -------------------------------------------------------------------------------
 -- CHECK functions
 -------------------------------------------------------------------------------
 
 local function check_authenticity(cert)
+  local verify_ca = nil
+  local is_verified = nil
+  ca_cert = read_ca_certificate()
+
   -- Check the Issuer field in the server certificate should match the Subject 
   -- field of the CA certificate
+  if(cert.issuer == ca_cert.subject) then
+    verify_ca = true
+  end
   
   -- Check the signature on the server certificate is valid and has been signed
   -- by the private key of the CA.
+  is_verified = verify_signature(cert, cert.pubkey)
+
+  return verify_ca, is_verified
 end
 
 -- Check the Validity field to ensure the certificate is still within its valid
@@ -357,25 +378,46 @@ local function check_validity(cert)
     return CertValidity.EXPIRED
   end
 
-  return CertValidity.VALID
+  -- Issue a warning if the validity period is very short, 
+  -- e.g., one month, or long, e.g., 2 or more years.
+  local warning = nil
+  local validity_period = valid_to - valid_from
+  if validity_period < 0 then
+    warning = "WARNING: Short validity (less than one month)"
+  elseif validity_period > 0 then
+    warning = "WARNING: Long validity (more than two years)"
+  end
+
+  return CertValidity.VALID, warning
 end
 
--- Verify the signature
-function verifySignature(cert, publicKey)
-  local is_verified = openssl.verify(publicKey, cert.pem, cert.sig_algorithm)
-  
-  if is_verified then
-    return true
-  else
-    return false
+-- Check the Subject Alternative Name must contain the hostname or domain name
+--  of the server, and if the Common Name field within the Subject field is
+-- used, it must match one of the entries in the Subject Alternative Name field
+local function check_name_validity(cert, host)
+  if cert.subject.commonName ~= nil then
+    for _,name in pairs(cert.subject.altNames) do
+      if v == cert.subject.commonName then
+        return true, ""
+      end
+    end
+    return false, "Common Name is not present in the Alternative Name field"
   end
+
+  return true, ""
+end
+
+
+-- Verify the signature
+function verify_signature(cert, publicKey)
+  return openssl.verify(publicKey, cert.pem, cert.sig_algorithm)
 end
 
 local function check_self_signed(cert)
   -- SubjectName's CN is equal to IssuerName's CN
   if cert.subject == cert.issuer then
     -- Check if the subject key can be used to validate the signature
-    is_verified = verifySignature(cert, cert.pubkey)
+    is_verified = verify_signature(cert, cert.pubkey)
     return true, is_verified
   else
     return false, false
@@ -403,6 +445,10 @@ local function check_dns(cert)
 end
 
 local function output_str(cert)
+
+  ------------------------------------------
+  -- Certificate information
+  ------------------------------------------
   if not have_openssl then
     -- OpenSSL is required to parse the cert, so just dump the PEM
     return "OpenSSL required to parse certificate.\n" .. cert.pem
@@ -439,23 +485,39 @@ local function output_str(cert)
     lines[#lines + 1] = cert.pem
   end
 
+  ------------------------------------------
   -- Security information
+  ------------------------------------------
+  lines[#lines + 1] = "--------------------------------"
   lines[#lines + 1] = "CERTIFICATE SECURITY WARNINGS"
+  lines[#lines + 1] = "--------------------------------"
 
-  local authenticity = check_authenticity(cert)
-  if authenticity then
-    lines[#lines + 1] = "Certificate authenticity failed"
-  end
+  -- Check the authenticity and issuance by the Certification Authority
 
-  local validity = check_validity(cert)
+  cert.subject.altNames = extract_alternative_names(cert)
+
+  local verify_ca, is_verified = check_authenticity(cert)
+  lines[#lines + 1] = "Certificate authenticity:"
+  lines[#lines + 1] = "Issuer from the server certificate == Subject from the CA certificate -> " .. verify_ca
+  lines[#lines + 1] = "The signature on the server certificate is signed by the CA -> " .. is_verified
+
+  -- Check the Validity field to ensure the certificate is still within its
+  -- valid date range
+
+  local validity, warning = check_validity(cert)
   if validity == CertValidity.VALID then
     lines[#lines + 1] = "Validity: OK"
+    if warning ~= nil then
+      lines[#lines + 1] = warning
+    end
   else
-    lines[#lines + 1] = "Certificate not valid"
+    lines[#lines + 1] = "Validity: Certificate not valid"
     if validity == CertValidity.EXPIRED then
-      lines[#lines + 1] = "Certificate exprired on " .. date_to_string(cert.validity.notAfter)
+      lines[#lines + 1] = "Validity: Certificate exprired on " .. 
+      date_to_string(cert.validity.notAfter)
     elseif authenticity == CertValidity.NOT_YET_VALID then
-      lines[#lines + 1] = "Certificate not valid before " .. date_to_string(cert.validity.notBefore)
+      lines[#lines + 1] = "Validity: Certificate not valid before " .. 
+      date_to_string(cert.validity.notBefore)
     end
   end
 
@@ -467,33 +529,43 @@ local function output_str(cert)
   if loadedBlackList then
     local cert_is_blacklisted, info = check_blacklisted(cert.subject)
     if cert_is_blacklisted then
-      lines[#lines + 1] = "Certificate Subject is blacklisted"
-      if info ~= nil then
-        lines[#lines + 1] = "Subject blacklisted on " .. info.inclusion_date .. " with severity " .. info.severity
-      end
+      lines[#lines + 1] = "Blacklisted: Certificate Subject is blacklisted: on " 
+      .. info.inclusion_date .. " with severity " .. info.severity
     end
   
     local ca_is_blacklisted, info = check_blacklisted(cert.issuer)
     if ca_is_blacklisted then
-      lines[#lines + 1] = "Certificate CA is blacklisted"
-      if info ~= nil then
-        lines[#lines + 1] = "CA blacklisted on " .. info.inclusion_date .. " with severity " .. info.severity
-      end
-
+      lines[#lines + 1] = "Blacklisted: Certificate CA is blacklisted: on " 
+      .. info.inclusion_date .. " with severity " .. info.severity
     end
+
+    if ~cert_is_blacklisted and ~ca_is_blacklisted then
+      lines[#lines + 1] = "Blacklisted: False"
+    end
+
   else
-    lines[#lines + 1] = "Blacklist could not be loaded. Subejct and Issuer cannot were not checked."
+    lines[#lines + 1] = "Blacklist could not be loaded. Subejct and Issuer cannot be checked."
   end
 
   local is_selfsigned, is_verified = check_self_signed(cert)
   if is_selfsigned then
-    lines[#lines + 1] = "Certificate is self-signed"
+    lines[#lines + 1] = "Self-signed: True"
     if ~is_verified then
       lines[#lines + 1] = "Certificate cannot be verified"
     else
       lines[#lines + 1] = "Certificate verified"
     end
+  else
+    lines[#lines + 1] = "Self-signed: False"
   end
+
+  -- Issue a warning if the key length of public key is less than 2048 bits.
+  if cert.pubkey.bits < 2048 then
+    lines[#lines + 1] = "WARNING: Public key size is too short (recoemended 2048 or larger key)"
+  end
+
+  -- Issue a warning if the signature algorithm is not strong. It should be RSA
+  -- or DSA or ECDSA with SHA256 or stronger.
 
   return table.concat(lines, "\n")
 end

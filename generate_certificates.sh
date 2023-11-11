@@ -9,13 +9,10 @@ generate_self_signed_certificate() {
     # Request Common Name (CN) from the user
     read -p "Enter Common Name (CN) for the self-signed certificate: " CN
     read -p "Enter Organization Name (O) for the self-signed certificate: " O
-    openssl req -x509 -keyout demoCA/private/serverkey.pem -out demoCA/cert.pem -subj "/C=ES/ST=Madrid/L=Getafe/O=$O/OU=Cybersecurity/CN=$CN/emailAddress=example@alumnos.uc3m.es"
+    openssl req -x509 -days 1 -newkey rsa:2048 -keyout /etc/apache2/keyserver.pem -out /etc/apache2/server.pem -subj "/C=ES/ST=Madrid/L=Getafe/O=$O/OU=Cybersecurity/CN=$CN/emailAddress=example@alumnos.uc3m.es"
     echo "Self-signed certificate generated successfully."
 
-    mv demoCA/cert.pem /etc/apache2/server.pem
-    mv demoCA/private/serverkey.pem /etc/apache2/keyserver.pem
-
-    # sudo service apache2 restart
+    sudo /etc/init.d/apache2 restart
 }
 
 generate_ca(){
@@ -26,7 +23,7 @@ generate_ca(){
     openssl req -x509 -new -days 3650 -keyout demoCA/private/cakey.pem -out demoCA/cacert.pem -subj "/C=ES/ST=Madrid/L=Getafe/O=$Oca/OU=Cybersecurity/CN=$CNca/emailAddress=example@alumnos.uc3m.es"
     echo "CA generated successfully."
 
-    mv demoCA/cacert.pem /etc/apache2/ca.pem
+    cp demoCA/cacert.pem /etc/apache2/ca.pem
 }
 
 # Function to generate a CA and sign the user's certificate with it
@@ -39,25 +36,23 @@ generate_server_certificate_signed() {
     openssl ca -in demoCA/csr.pem -out demoCA/cert.pem
     echo "User's certificate signed by the CA."
 
-    mv demoCA/cert.pem /etc/apache2/server.pem
-    mv demoCA/private/serverkey.pem /etc/apache2/keyserver.pem
+    cp demoCA/cert.pem /etc/apache2/server.pem
+    cp demoCA/private/serverkey.pem /etc/apache2/keyserver.pem
 
     sudo /etc/init.d/apache2 restart
 }
 
 # Main script
 # Verify if the directory exists
-if [ -d "demoCA" ]; then
-    rm -r "demoCA"
+if [ ! -d "demoCA" ]; then
+    # Create the directory again
+    echo "Creating the necessary folders and files..."
+    mkdir -p "demoCA/private"
+    mkdir -p "demoCA/newcerts"
+    touch demoCA/index.txt
+    echo 01 > demoCA/serial
+    echo 01 > demoCA/crlnumber
 fi
-
-# Create the directory again
-echo "Creating the necessary folders and files..."
-mkdir -p "demoCA/private"
-mkdir -p "demoCA/newcerts"
-touch demoCA/index.txt
-echo 01 > demoCA/serial
-echo 01 > demoCA/crlnumber
 
 echo "Choose an option:"
 echo "1. Generate a self-signed certificate"
