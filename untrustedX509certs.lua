@@ -120,9 +120,8 @@ local dnsRecords = {}
 local loadedDNS= false
 
 -- Variables to store the CA certificate
-local ca_subject = nil
-local ca_issuer = nil
-local ca_cert = nil
+local verify_authenticity = false
+local verify_issuance = false
 
 -------------------------------------------------------------------------------
 -- ENUM definitions
@@ -220,6 +219,41 @@ local function load_blacklist(file)
   return true
 end
 
+local function compare_subject_issuer(subject, issuer)
+
+  if subject.commonName ~= issuer.commonName then
+    return false
+  end
+
+  if subject.organizationName ~= issuer.organizationName then
+    return false
+  end
+
+  if subject.organizationalUnitName ~= issuer.organizationalUnitName then
+    return false
+  end
+
+  if subject.countryName ~= issuer.countryName then
+    return false
+  end
+
+  if subject.localityName ~= issuer.localityName then
+    return false
+  end
+
+  if subject.stateOrProvinceName ~= issuer.stateOrProvinceName then
+    return false
+  end
+
+  for i, _ in ipairs(subject.altNames) do
+    if subject.altNames[i] ~= issuer.altNames[i] then 
+      return false
+    end
+  end
+
+  return true
+end
+
 
 -- Check if a name is in the blacklist
 local function is_issuer_blacklisted(names)
@@ -229,9 +263,11 @@ local function is_issuer_blacklisted(names)
     return true
   end
 
-  for _, altName in ipairs(names.altNames) do
-    if issuerBlacklist[altName] ~= nil then
-      return true
+  if names.altNames ~= nil then
+    for _, altName in ipairs(names.altNames) do
+      if issuerBlacklist[altName] ~= nil then
+        return true
+      end
     end
   end
 
@@ -255,16 +291,70 @@ local function get_blacklist_information(names)
   return nil
 end
 
-function read_ca_certificate(host, port)
-  -- return sslcert.parse_ssl_certificate(io.open(caCertPath, 'r'):read("*a"))
+-- Function to transform the certificate DN
+function transform_cert_dn(cert)
+  local transformed_dn = {}
+  
+  -- Mapping of keys from the first format to the second format
+  local key_mapping = {
+    C = "countryName",
+    ST = "stateOrProvinceName",
+    L = "localityName",
+    O = "organizationName",
+    OU = "organizationalUnitName",
+    CN = "commonName",
+    emailAddress = "emailAddress"
+  }
+
+  -- Split the input DN into key-value pairs
+  local temp_pairs = {}
+  for key, value in cert:gmatch(" *([^=,]+) = ([^,]+) *") do
+    temp_pairs[key] = value
+  end
+
+  -- Transform the DN using the key mapping
+  for key, value in pairs(temp_pairs) do
+    local new_key = key_mapping[key] or key
+    transformed_dn[new_key] = value
+  end
+
+  return transformed_dn
+end
+
+function check_authenticity(host, port, cert)
   local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
   local handle = io.popen(cmd)
   local certificate_chain = handle:read("*a")
   handle:close()
   
-  local cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
-  local s, i, c = cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
-  return s, i, c
+  local temp_cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
+  local ca_subject, _, ca_cert = temp_cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
+
+  -- Check the Issuer field in the server certificate should match the Subject 
+  -- field of the CA certificate
+  print("-----------AUTHENTICITY-----------")
+  print(transform_cert_dn(ca_subject))
+  ca_subject_table = transform_cert_dn(ca_subject)
+  if(compare_subject_issuer(ca_subject_table, cert.issuer)) then
+    verify_authenticity = true
+    print(verify_authenticity)
+  end
+  
+  -- Check the signature on the server certificate is valid and has been signed
+  -- by the private key of the CA.
+  local file = io.open("ca_cert.pem", "w")
+  file:write(ca_cert)
+  file:close()
+
+  local file = io.open("server_cert.pem", "w")
+  file:write(string.format("%s", cert.pem))
+  file:close()
+
+  local handle = io.popen("openssl verify -CAfile ca_cert.pem server_cert.pem")
+  local verify_output = handle:read("*a")
+  print(verify_output)
+  verify_issuance = string.match(verify_output, "OK")
+  handle:close()
 end
 
 -------------------------------------------------------------------------------
@@ -384,23 +474,6 @@ end
 -- CHECK functions
 -------------------------------------------------------------------------------
 
-local function check_authenticity(cert)
-  local verify_ca = nil
-  local is_verified = nil
-
-  -- Check the Issuer field in the server certificate should match the Subject 
-  -- field of the CA certificate
-  if(cert.issuer == ca_subject) then
-    verify_ca = true
-  end
-  
-  -- Check the signature on the server certificate is valid and has been signed
-  -- by the private key of the CA.
-  -- is_verified = verify_signature(cert, cert.pubkey)
-
-  return verify_ca, is_verified
-end
-
 -- Check the Validity field to ensure the certificate is still within its valid
 -- date range
 
@@ -455,7 +528,7 @@ end
 
 local function check_self_signed(cert)
   -- SubjectName's CN is equal to IssuerName's CN
-  if cert.subject == cert.issuer then
+  if compare_subject_issuer(cert.subject, cert.issuer) then
     -- Check if the subject key can be used to validate the signature
     is_verified = verify_signature(cert, cert.pubkey)
     return true, is_verified
@@ -551,9 +624,10 @@ local function output_str(cert)
   cert.subject.altNames = extract_alternative_names(cert)
 
   -- local verify_ca, is_verified = check_authenticity(cert)
-  -- lines[#lines + 1] = "Certificate authenticity:"
-  -- lines[#lines + 1] = "Issuer from the server certificate == Subject from the CA certificate -> " .. verify_ca
-  -- lines[#lines + 1] = "The signature on the server certificate is signed by the CA -> " .. is_verified
+  -- lines[#lines + 1] = "Certificate authenticity and issuance by the Certification Authority:"
+  -- lines[#lines + 1] = "Authenticity -> " .. string.format("%s", verify_authenticity)
+  -- lines[#lines + 1] = "Server Valid Signature -> " .. string.format("%s", verify_signature(cert, cert.pubkey))
+  -- lines[#lines + 1] = "Issuance: -> " .. string.format("%s", verify_issuance)
 
   -- Check the Validity field to ensure the certificate is still within its
   -- valid date range
@@ -635,9 +709,10 @@ action = function(host, port)
     stdnse.debug1("getCertificate error: %s", cert or "unknown")
     return
   end
-  ca_subject, ca_issuer, ca_cert = read_ca_certificate(host, port)
+
   loadedBlackList = load_blacklist(blacklistFile)
   loadedDNS = load_dns(dnsPath)
+  check_authenticity(host, port, cert)
 
   return output_tab(cert), output_str(cert)
 end
