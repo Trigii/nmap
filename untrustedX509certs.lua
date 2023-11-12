@@ -42,10 +42,13 @@ name does not belong to the range of IPs associated with such domain.
 -- @args list the path to the file with the blacklist. (default: blacklist.csv)
 -- 
 --- Optional arguments
--- file: path to the file with the blacklist (blacklist.csv)
--- ca: path to the file with the Certifaction Authority certificate (/etc/ssl/certs/cacert.pem)
+-- list: path to the file with the blacklist (blacklist.csv)
+-- dns-file: path to the file with the DNS records (dns.csv)
 
--- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse --script-args file=blacklistfile.csv
+-- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse
+-- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse --script-args list=blacklistfile.csv
+-- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse --script-args dns-file=dnsfile.csv
+-- @usage nmap -sV <target-ip> --script=./untrustedX509certs.nse --script-args list=blacklistfile.csv dns-file=dnsfile.csv
 --
 ---
 -- @xmloutput
@@ -98,7 +101,7 @@ categories = { "default", "safe", "discovery" }
 dependencies = {"https-redirect"}
 
 local blacklistFile = stdnse.get_script_args('list') or 'blacklist.csv'
-local caCertPath = stdnse.get_script_args('ca') or '/etc/ssl/certs/cacert.pem'
+local dnsPath = stdnse.get_script_args('dns-file') or 'dns.csv'
 
 portrule = function(host, port)
   return shortport.ssl(host, port) or sslcert.isPortSupported(port) or sslcert.getPrepareTLSWithoutReconnect(port)
@@ -108,10 +111,18 @@ end
 -- Global variables
 -------------------------------------------------------------------------------
 
--- Define a table to store the blacklist
+-- Table to store the blacklist
 local issuerBlacklist = {}
-
 local loadedBlackList = false
+
+-- Table to store the dns records
+local dnsRecords = {}
+local loadedDNS= false
+
+-- Variables to store the CA certificate
+local ca_subject = nil
+local ca_issuer = nil
+local ca_cert = nil
 
 -------------------------------------------------------------------------------
 -- ENUM definitions
@@ -168,6 +179,26 @@ local function extract_alternative_names(cert)
   return altNames
 end
 
+-- Load the dns records from a file
+local function load_dns(file)
+  local file_handle = io.open(file, "r")
+  if not file_handle then
+    return false
+  end
+
+  for line in file_handle:lines() do
+    local domaninName, ipRange = line:match("([^;]+);([^;]+))")
+    if domaninName and ipRange then
+      dnsRecords[domaninName] = {
+        range = ipRange
+      }
+    end
+  end
+
+  file_handle:close()
+  return true
+end
+
 -- Load the blacklist from a file
 local function load_blacklist(file)
   local file_handle = io.open(file, "r")
@@ -188,6 +219,8 @@ local function load_blacklist(file)
   file_handle:close()
   return true
 end
+
+
 -- Check if a name is in the blacklist
 local function is_issuer_blacklisted(names)
   if issuerBlacklist[names.commonName] ~= nil then
@@ -222,8 +255,16 @@ local function get_blacklist_information(names)
   return nil
 end
 
-function read_ca_certificate()
-  return sslcert.parse_ssl_certificate(io.open(caCertPath, 'r'):read("*a"))
+function read_ca_certificate(host, port)
+  -- return sslcert.parse_ssl_certificate(io.open(caCertPath, 'r'):read("*a"))
+  local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
+  local handle = io.popen(cmd)
+  local certificate_chain = handle:read("*a")
+  handle:close()
+  
+  local cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
+  local s, i, c = cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
+  return s, i, c
 end
 
 -------------------------------------------------------------------------------
@@ -346,17 +387,16 @@ end
 local function check_authenticity(cert)
   local verify_ca = nil
   local is_verified = nil
-  ca_cert = read_ca_certificate()
 
   -- Check the Issuer field in the server certificate should match the Subject 
   -- field of the CA certificate
-  if(cert.issuer == ca_cert.subject) then
+  if(cert.issuer == ca_subject) then
     verify_ca = true
   end
   
   -- Check the signature on the server certificate is valid and has been signed
   -- by the private key of the CA.
-  is_verified = verify_signature(cert, cert.pubkey)
+  -- is_verified = verify_signature(cert, cert.pubkey)
 
   return verify_ca, is_verified
 end
@@ -382,9 +422,9 @@ local function check_validity(cert)
   -- e.g., one month, or long, e.g., 2 or more years.
   local warning = nil
   local validity_period = valid_to - valid_from
-  if validity_period < 0 then
+  if validity_period < 2678400 then
     warning = "WARNING: Short validity (less than one month)"
-  elseif validity_period > 0 then
+  elseif validity_period > 63072000 then
     warning = "WARNING: Long validity (more than two years)"
   end
 
@@ -444,6 +484,18 @@ local function check_dns(cert)
   -- Check if the web server IP is the corresponding hostname IP
 end
 
+local function check_ciphersuite(cert)
+  local hashAlg, encAlg =  cert.sig_algorithm:match("^(.+)With(.+)Encryption$")
+  local secureHash = false
+  local secureEnc = encAlg == 'RSA' or encAlg == 'DSA' or encAlg == 'ECDSA' 
+  if hashAlg ~= nil and hashAlg:match("^sha(.+)$") then
+    local size = hashAlg:match("^sha([0-9]+)$")
+    secureHash = tonumber(size) >= 256
+  end
+
+  return secureHash and secureEnc
+end
+
 local function output_str(cert)
 
   ------------------------------------------
@@ -477,8 +529,10 @@ local function output_str(cert)
   date_to_string(cert.validity.notAfter)
 
   if nmap.verbosity() > 1 then
-    lines[#lines + 1] = "MD5:   " .. stdnse.tohex(cert:digest("md5"), { separator = " ", group = 4 })
-    lines[#lines + 1] = "SHA-1: " .. stdnse.tohex(cert:digest("sha1"), { separator = " ", group = 4 })
+    lines[#lines + 1] = "MD5:   " .. 
+    stdnse.tohex(cert:digest("md5"), { separator = " ", group = 4 })
+    lines[#lines + 1] = "SHA-1: " .. 
+    stdnse.tohex(cert:digest("sha1"), { separator = " ", group = 4 })
   end
 
   if nmap.verbosity() > 1 then
@@ -496,10 +550,10 @@ local function output_str(cert)
 
   cert.subject.altNames = extract_alternative_names(cert)
 
-  local verify_ca, is_verified = check_authenticity(cert)
-  lines[#lines + 1] = "Certificate authenticity:"
-  lines[#lines + 1] = "Issuer from the server certificate == Subject from the CA certificate -> " .. verify_ca
-  lines[#lines + 1] = "The signature on the server certificate is signed by the CA -> " .. is_verified
+  -- local verify_ca, is_verified = check_authenticity(cert)
+  -- lines[#lines + 1] = "Certificate authenticity:"
+  -- lines[#lines + 1] = "Issuer from the server certificate == Subject from the CA certificate -> " .. verify_ca
+  -- lines[#lines + 1] = "The signature on the server certificate is signed by the CA -> " .. is_verified
 
   -- Check the Validity field to ensure the certificate is still within its
   -- valid date range
@@ -539,7 +593,7 @@ local function output_str(cert)
       .. info.inclusion_date .. " with severity " .. info.severity
     end
 
-    if ~cert_is_blacklisted and ~ca_is_blacklisted then
+    if not cert_is_blacklisted and not ca_is_blacklisted then
       lines[#lines + 1] = "Blacklisted: False"
     end
 
@@ -550,7 +604,7 @@ local function output_str(cert)
   local is_selfsigned, is_verified = check_self_signed(cert)
   if is_selfsigned then
     lines[#lines + 1] = "Self-signed: True"
-    if ~is_verified then
+    if not is_verified then
       lines[#lines + 1] = "Certificate cannot be verified"
     else
       lines[#lines + 1] = "Certificate verified"
@@ -561,11 +615,15 @@ local function output_str(cert)
 
   -- Issue a warning if the key length of public key is less than 2048 bits.
   if cert.pubkey.bits < 2048 then
-    lines[#lines + 1] = "WARNING: Public key size is too short (recoemended 2048 or larger key)"
+    lines[#lines + 1] = "WARNING: Public key size is too short (recomended 2048 or larger key)"
   end
 
   -- Issue a warning if the signature algorithm is not strong. It should be RSA
   -- or DSA or ECDSA with SHA256 or stronger.
+
+  if not check_ciphersuite(cert) then
+    lines[#lines + 1] = "WARNING: signature algorithm is not strong (It should be RSA or DSA or ECDSA with SHA256 or stronger)."
+  end
 
   return table.concat(lines, "\n")
 end
@@ -577,8 +635,9 @@ action = function(host, port)
     stdnse.debug1("getCertificate error: %s", cert or "unknown")
     return
   end
-
+  ca_subject, ca_issuer, ca_cert = read_ca_certificate(host, port)
   loadedBlackList = load_blacklist(blacklistFile)
+  loadedDNS = load_dns(dnsPath)
 
   return output_tab(cert), output_str(cert)
 end
