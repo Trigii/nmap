@@ -1,0 +1,53 @@
+# Nmap 7.91 scan initiated Mon Nov 13 12:26:18 2023 as: nmap -Pn -p443 --script untrustedX509certs.nse --script-args list=blacklist.csv -v -oN test05.out 10.0.3.149 dns-file=dns.csv
+Failed to resolve "dns-file=dns.csv".
+Failed to resolve "dns-file=dns.csv".
+Nmap scan report for 10.0.3.149
+Host is up (0.00057s latency).
+
+PORT    STATE SERVICE
+443/tcp open  https
+| untrustedX509certs: Subject: commonName=10.0.3.149/organizationName=UC3M/stateOrProvinceName=MADRID/countryName=ES/localityName=GETAFE/organizationalUnitName=UC3M Cyber
+| Subject Alternative Name: DNS:10.0.3.149, DNS:cyber.uc3m.es
+| Issuer: commonName=10.0.3.149/organizationName=UC3M/stateOrProvinceName=MADRID/countryName=ES/localityName=GETAFE/organizationalUnitName=UC3M Cyber
+| Public Key type: rsa
+| Public Key bits: 1024
+| Signature Algorithm: sha256WithRSAEncryption
+| Not valid before: 2023-11-12T16:57:05
+| Not valid after:  2023-11-13T16:57:05
+| MD5:   36c6 d1c9 3e52 213d a876 d18c 7f52 09f8
+| SHA-1: a91a 9910 ccaa 2924 2a84 2ab6 aa4c 000a d4e0 e4b6
+| -----BEGIN CERTIFICATE-----
+| MIIC0jCCAjugAwIBAgIUbSB6dKzrcXXvtGihbIpqX/pjB+0wDQYJKoZIhvcNAQEL
+| BQAwaDELMAkGA1UEBhMCRVMxDzANBgNVBAgMBk1BRFJJRDEPMA0GA1UEBwwGR0VU
+| QUZFMQ0wCwYDVQQKDARVQzNNMRMwEQYDVQQLDApVQzNNIEN5YmVyMRMwEQYDVQQD
+| DAoxMC4wLjMuMTQ5MB4XDTIzMTExMjE2NTcwNVoXDTIzMTExMzE2NTcwNVowaDEL
+| MAkGA1UEBhMCRVMxDzANBgNVBAgMBk1BRFJJRDEPMA0GA1UEBwwGR0VUQUZFMQ0w
+| CwYDVQQKDARVQzNNMRMwEQYDVQQLDApVQzNNIEN5YmVyMRMwEQYDVQQDDAoxMC4w
+| LjMuMTQ5MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCn0zV8dPRZpVQ9mt7I
+| Dtu9Due8PR8bdn7lIvWMNC2FpNvr7E0YEZzldjEq2Jo6WCYJH8Z0+uwrUe7S99Po
+| Z7esLUSbC7FkapvQVM61hE/A2SCOfcPCY59NGtFV8muo1CY9IkSc/Yk13ATY1AHh
+| AjcwIj/D/0EJa3K/kqn/TrWASwIDAQABo3kwdzAkBgNVHREEHTAbggoxMC4wLjMu
+| MTQ5gg1jeWJlci51YzNtLmVzMB0GA1UdDgQWBBTjZpksoqMpFlwLoDiBlVMQZp6A
+| 9TAfBgNVHSMEGDAWgBTjZpksoqMpFlwLoDiBlVMQZp6A9TAPBgNVHRMBAf8EBTAD
+| AQH/MA0GCSqGSIb3DQEBCwUAA4GBAHbe4kY0AyPyNzihCLUdICaKzaR92fyR2BWj
+| yBdo0DPU2k8TEiQBMNQpuD9iNxyMZRMESuZJs0IkKB80SrOnF/jnxOzsp9caBmF0
+| O+j6/waAZ2vJgRq3iJERj2gtF4uCWCwkbdqEIprY4KxuWNb/p3Q1dJJfYOAIEgZf
+| SE8QazWp
+| -----END CERTIFICATE-----
+| 
+| --------------------------------
+| CERTIFICATE SECURITY REPORT
+| --------------------------------
+| Self-signed: True
+| Certificate cannot be verified
+| Validity: Certificate is NOT VALID
+| Validity: Certificate exprired on 2023-11-13T16:57:05
+| Certificate Subject Alternative Names contains hostname
+| Blacklisted: False
+| DNS resolved: True
+| DNS: server ip is in a VALID RANGE
+|_WARNING: Public key size is too short (recomended 2048 or larger key)
+
+Failed to resolve "dns-file=dns.csv".
+Read data files from: /usr/bin/../share/nmap
+# Nmap done at Mon Nov 13 12:26:31 2023 -- 1 IP address (1 host up) scanned in 13.24 seconds

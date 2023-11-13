@@ -1,0 +1,20 @@
+Authors: Javier Sande Ríos; Tristán Vaquero
+
+Description: Scan host with a valid and with blacklisted certificate firngerprint and not valid range.
+
+Input:
+	* list: blacklist.csv
+	* dns-list: dns.csv
+
+Output:
+	* Information about the certificate
+	* Self-signed: True
+	* Verified: True
+	* Validity: False (Expired)
+	* Valid names: False
+	* Blacklisted: True (Blacklisted subject)
+	* DNS resolved: True
+	* DNS: IP NOT in valid range
+
+Command: $ nmap -Pn -p443 10.0.3.149 --script untrustedX509certs.nse --script-args list=blacklist.csv dns-list=dns.csv -v -oN test10.out
+

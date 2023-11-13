@@ -1,0 +1,69 @@
+# Nmap 7.91 scan initiated Mon Nov 13 11:50:02 2023 as: nmap -Pn -p443 --script untrustedX509certs.nse --script-args list=blacklist.csv -v -oN test03.out 10.0.3.149 dns-file=dns.csv
+Failed to resolve "dns-file=dns.csv".
+Failed to resolve "dns-file=dns.csv".
+Nmap scan report for 10.0.3.149
+Host is up (0.00052s latency).
+
+PORT    STATE SERVICE
+443/tcp open  https
+| untrustedX509certs: Subject: commonName=10.0.3.149/organizationName=UC3M/stateOrProvinceName=MADRID/countryName=ES/localityName=GETAFE/organizationalUnitName=UC3M Cyber
+| Subject Alternative Name: DNS:cyber.uc3m.es, DNS:10.0.3.149
+| Issuer: commonName=10.0.3.149/organizationName=UC3M/stateOrProvinceName=MADRID/countryName=ES/localityName=GETAFE/organizationalUnitName=UC3M Cyber
+| Public Key type: rsa
+| Public Key bits: 4096
+| Signature Algorithm: sha1WithRSAEncryption
+| Not valid before: 2023-11-13T15:48:36
+| Not valid after:  2033-11-10T15:48:36
+| MD5:   5537 5fcc dbc9 77e2 7cab 29d2 d618 cc8d
+| SHA-1: f6e9 4b4d 8e9c fd80 f396 5e02 628d d302 f01d d71f
+| -----BEGIN CERTIFICATE-----
+| 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
+| 7Qr660rNVIzPNek=
+| -----END CERTIFICATE-----
+| 
+| --------------------------------
+| CERTIFICATE SECURITY REPORT
+| --------------------------------
+| Self-signed: True
+| Certificate verified
+| Validity: Certificate is VALID
+| Certificate Subject Alternative Names contains hostname
+| Blacklisted: False
+| DNS resolved: True
+| DNS: server ip is in a VALID RANGE
+| WARNING: Long validity (more than two years)
+|_WARNING: signature algorithm is not strong (It should be RSA or DSA or ECDSA with SHA256 or stronger).
+
+Failed to resolve "dns-file=dns.csv".
+Read data files from: /usr/bin/../share/nmap
+# Nmap done at Mon Nov 13 11:50:15 2023 -- 1 IP address (1 host up) scanned in 13.28 seconds

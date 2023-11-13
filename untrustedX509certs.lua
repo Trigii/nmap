@@ -328,7 +328,9 @@ local function extract_alternative_names(cert)
   if cert.extensions then
     for _, ext in ipairs(cert.extensions) do
       if ext.name == "X509v3 Subject Alternative Name" then
-        table.insert(altNames, ext.value)
+        for name in ext.value:gmatch("([^:,]+)") do
+          table.insert(altNames, name)
+        end
       end
     end
   end
@@ -413,15 +415,15 @@ local function compare_subject_issuer(subject, issuer)
 end
 
 -- Retrieve inforamtion (date and severity) about the blacklisted name entry
-local function get_blacklist_information(names)
+local function get_blacklist_information(names, altNames)
   if issuerBlacklist[names.commonName] ~= nil then
     return issuerBlacklist[names.commonName]
   elseif issuerBlacklist[names.organizationName] ~= nil then
     return issuerBlacklist[names.organizationName]
   end
 
-  if names.altNames ~= nil then
-    for _, altName in ipairs(names.altNames) do
+  if altNames ~= nil then
+    for _, altName in ipairs(altNames) do
       if issuerBlacklist[altName] ~= nil then
         return issuerBlacklist[altName]
       end
@@ -461,11 +463,19 @@ local function transform_cert_dn(cert)
   return transformed_dn
 end
 
+local function ipToNumber(ip)
+  local num = 0
+  for i, octet in ipairs({ip:match("(%d+)%.(%d+)%.(%d+)%.(%d+)")}) do
+      num = num + tonumber(octet) * 256^(4 - i)
+  end
+  return num
+end
+
 -- Function to check if an ip is in a given range
 local function ip_in_range(ip, min, max)
-  local ipNum = socket.inet_pton(ip)
-  local minNum = socket.inet_pton(min)
-  local maxNum = socket.inet_pton(max)
+  local ipNum = ipToNumber(ip)
+  local minNum = ipToNumber(min)
+  local maxNum = ipToNumber(max)
 
   return ipNum >= minNum and ipNum <= maxNum
 end
@@ -596,202 +606,6 @@ local function output_tab(cert)
   return o
 end
 
--------------------------------------------------------------------------------
--- CHECK functions
--------------------------------------------------------------------------------
-
--- Check the Validity field to ensure the certificate is still within its valid
--- date range
-
-local function check_validity(cert)
-  -- Get the current date
-  local current_time = os.time(os.date("!*t"))
-
-  -- Check certificate validity
-  local valid_from = os.time(cert.validity.notBefore)
-  local valid_to = os.time(cert.validity.notAfter)
- 
-  if current_time < valid_from then
-    return CertValidity.NOT_YET_VALID
-  elseif current_time > valid_to then
-    return CertValidity.EXPIRED
-  end
-
-  -- Issue a warning if the validity period is very short, 
-  -- e.g., one month, or long, e.g., 2 or more years.
-  local warning = nil
-  local validity_period = valid_to - valid_from
-  if validity_period < 2678400 then
-    warning = "WARNING: Short validity (less than one month)"
-  elseif validity_period > 63072000 then
-    warning = "WARNING: Long validity (more than two years)"
-  end
-
-  return CertValidity.VALID, warning
-end
-
--- Check the Subject Alternative Name must contain the hostname or domain name
---  of the server, and if the Common Name field within the Subject field is
--- used, it must match one of the entries in the Subject Alternative Name field
-local function check_name_validity(cert, hostname)
-  local hostPresent = false
-  local cnPresent = cert.subject.commonName == nil
-  local idn_homograph_attack = false
-
-  for _, name in pairs(cert.subject.altNames) do
-    if name == hostname.ip then
-      hostPresent = true
-    end
-
-    -- Detect possible IDN Homograph attack on alternative names
-    if check(name) then
-      idn_homograph_attack = true
-    end
-  end
-
-  if cert.subject.commonName ~= nil then
-    for _, name in pairs(cert.subject.altNames) do
-      if name == cert.subject.commonName then
-        cnPresent = true
-      end
-    end
-  end
-
-  return hostPresent, cnPresent
-end
-
-
--- Verify the signature of self-signed certificate
-function verify_signature(cert)
-  local is_verified = false
-  local file = io.open("server.pem", "w")
-  file:write(string.format("%s", cert.pem))
-  file:close()
-
-  local handle = io.popen("openssl verify -CAfile server.pem server.pem")
-  local verify_output = handle:read("*a")
-  is_selfsigned = string.match(verify_output, "OK")
-  if is_selfsigned == "OK" then
-    is_verified = true
-  end
-  handle:close()
-  print(is_verified)
-  return is_verified
-end
-
-function check_authenticity(host, port, cert)
-  local verify_authenticity = false
-  local verify_issuance = false
-  local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
-  local handle = io.popen(cmd)
-  local certificate_chain = handle:read("*a")
-  handle:close()
-  
-  local temp_cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
-  local ca_subject, _, ca_cert = temp_cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
-
-  -- Check the Issuer field in the server certificate should match the Subject 
-  -- field of the CA certificate
-  print("-----------AUTHENTICITY-----------")
-  print(transform_cert_dn(ca_subject))
-  ca_subject_table = transform_cert_dn(ca_subject)
-  if(compare_subject_issuer(ca_subject_table, cert.issuer)) then
-    verify_authenticity = true
-    print(verify_authenticity)
-  end
-  
-  -- Check the signature on the server certificate is valid and has been signed
-  -- by the private key of the CA.
-  local file = io.open("ca_cert.pem", "w")
-  file:write(ca_cert)
-  file:close()
-
-  local file = io.open("server_cert.pem", "w")
-  file:write(string.format("%s", cert.pem))
-  file:close()
-
-  local handle = io.popen("openssl verify -CAfile ca_cert.pem server_cert.pem")
-  local verify_output = handle:read("*a")
-  print(verify_output)
-  handle:close()
-  local issuance = string.match(verify_output, "OK")
-  if issuance == "OK" then
-    verify_issuance = true
-  end
-
-  if verify_authenticity == true and verify_issuance == true then
-    return true
-  else
-    return false
-  end
-end
-
-local function check_self_signed(cert)
-  -- SubjectName's CN is equal to IssuerName's CN
-  if compare_subject_issuer(cert.subject, cert.issuer) then
-    -- Check if the subject key can be used to validate the signature
-    is_verified = verify_signature(cert)
-    return true, is_verified
-  else
-    return false, false
-  end
-end
-
--- Check if the certificate's SubjectName or IssuerName (i.e., organization or
--- common name) or fingerprint (SHA1) are found in the blacklist of malicious servers, domains, or CAs.
-
-local function check_blacklisted(cert)
-  -- Check if names are found in the blacklist of malicious servers, domains,
-  -- or CAs.
-  local info = get_blacklist_information(cert.subject)
-  local ca_info = get_blacklist_information(cert.issuer)
-
-  if info == nil then
-    info = signatureBlacklist[stdnse.tohex(cert:digest("sha1"), { separator = "", group = 4 })]
-  end
-
-
-  return info, ca_info
-end
-
-local function check_dns(cert, host)
-  -- Check if the web server IP is the corresponding hostname IP
-  local ip = host.ip:match("[0-9]+.[0-9]+.[0-9]+.[0-9]+")
-
-  -- Check if the web server IP is present in the Subject Alternative Names 
-  if ip == nil then
-    for _, name in pairs(cert.subject.altNames) do
-      ip = name:match("[0-9]+.[0-9]+.[0-9]+.[0-9]+")
-      if ip ~= nil then
-        break
-      end
-    end
-  end
-
-  -- Check if any domainname in the Subject Alternative Names 
-  -- has a knonw ip address range
-  for _, name in pairs(cert.subject.altNames) do
-    if dnsRecords[name] ~= nil then
-      local min, max = dnsRecords[name]
-      return true, ip_in_range(ip, min, max)
-    end
-  end
-
-  return false, false
-end
-
-local function check_ciphersuite(cert)
-  local hashAlg, encAlg =  cert.sig_algorithm:match("^(.+)With(.+)Encryption$")
-  local secureHash = false
-  local secureEnc = encAlg == 'RSA' or encAlg == 'DSA' or encAlg == 'ECDSA' 
-  if hashAlg ~= nil and hashAlg:match("^sha(.+)$") then
-    local size = hashAlg:match("^sha([0-9]+)$")
-    secureHash = tonumber(size) >= 256
-  end
-
-  return secureHash and secureEnc
-end
-
 local function output_str(cert)
 
   ------------------------------------------
@@ -915,33 +729,210 @@ local function output_str(cert)
 
   return table.concat(lines, "\n")
 end
+-------------------------------------------------------------------------------
+-- CHECK functions
+-------------------------------------------------------------------------------
+
+-- Check the Validity field to ensure the certificate is still within its valid
+-- date range
+
+local function check_validity(cert)
+  -- Get the current date
+  local current_time = os.time(os.date("!*t"))
+
+  -- Check certificate validity
+  local valid_from = os.time(cert.validity.notBefore)
+  local valid_to = os.time(cert.validity.notAfter)
+ 
+  if current_time < valid_from then
+    return CertValidity.NOT_YET_VALID
+  elseif current_time > valid_to then
+    return CertValidity.EXPIRED
+  end
+
+  -- Issue a warning if the validity period is very short, 
+  -- e.g., one month, or long, e.g., 2 or more years.
+  local warning = nil
+  local validity_period = valid_to - valid_from
+  if validity_period < 2678400 then
+    warning = "WARNING: Short validity (less than one month)"
+  elseif validity_period > 63072000 then
+    warning = "WARNING: Long validity (more than two years)"
+  end
+
+  return CertValidity.VALID, warning
+end
+
+-- Check the Subject Alternative Name must contain the hostname or domain name
+--  of the server, and if the Common Name field within the Subject field is
+-- used, it must match one of the entries in the Subject Alternative Name field
+local function check_name_validity(cert, subjectAltNames, host)
+  local hostPresent = false
+  local cnPresent = cert.subject.commonName == nil
+  local idn_homograph_attack = false
+
+  for _, name in pairs(subjectAltNames) do
+    if name == host.ip or name == host.name then
+      hostPresent = true
+    end
+
+    -- Detect possible IDN Homograph attack on alternative names
+    if check(name) then
+      idn_homograph_attack = true
+    end
+  end
+
+  if cert.subject.commonName ~= nil then
+    for _, name in pairs(subjectAltNames) do
+      if name:match("(DNS:[^,]+)") ~= nil then
+        name = name:match("DNS:([^:,]+)")
+      end
+
+      if name == cert.subject.commonName then
+        cnPresent = true
+      end
+    end
+  end
+
+  return hostPresent, cnPresent
+end
+
+
+-- Verify the signature of self-signed certificate
+function verify_signature(cert)
+  local is_verified = false
+  local file = io.open("server.pem", "w")
+  file:write(string.format("%s", cert.pem))
+  file:close()
+
+  local handle = io.popen("openssl verify -CAfile server.pem server.pem")
+  local verify_output = handle:read("*a")
+  is_selfsigned = string.match(verify_output, "OK")
+  if is_selfsigned == "OK" then
+    is_verified = true
+  end
+  handle:close()
+  return is_verified
+end
+
+function check_authenticity(host, port, cert)
+  local verify_authenticity = false
+  local verify_issuance = false
+  local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
+  local handle = io.popen(cmd)
+  local certificate_chain = handle:read("*a")
+  handle:close()
+  
+  local temp_cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
+  local ca_subject, _, ca_cert = temp_cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
+
+  -- Check the Issuer field in the server certificate should match the Subject 
+  -- field of the CA certificate
+  ca_subject_table = transform_cert_dn(ca_subject)
+  if(compare_subject_issuer(ca_subject_table, cert.issuer)) then
+    verify_authenticity = true
+  end
+  
+  -- Check the signature on the server certificate is valid and has been signed
+  -- by the private key of the CA.
+  local file = io.open("ca_cert.pem", "w")
+  file:write(ca_cert)
+  file:close()
+
+  local file = io.open("server_cert.pem", "w")
+  file:write(string.format("%s", cert.pem))
+  file:close()
+
+  local handle = io.popen("openssl verify -CAfile ca_cert.pem server_cert.pem")
+  local verify_output = handle:read("*a")
+  handle:close()
+  local issuance = string.match(verify_output, "OK")
+  if issuance == "OK" then
+    verify_issuance = true
+  end
+
+  if verify_authenticity == true and verify_issuance == true then
+    return true
+  else
+    return false
+  end
+end
+
+local function check_self_signed(cert)
+  -- SubjectName's CN is equal to IssuerName's CN
+  if compare_subject_issuer(cert.subject, cert.issuer) then
+    -- Check if the subject key can be used to validate the signature
+    is_verified = verify_signature(cert)
+    return true, is_verified
+  else
+    return false, false
+  end
+end
+
+-- Check if the certificate's SubjectName or IssuerName (i.e., organization or
+-- common name) or fingerprint (SHA1) are found in the blacklist of malicious servers, domains, or CAs.
+
+local function check_blacklisted(cert, subjectAltNames)
+  -- Check if names are found in the blacklist of malicious servers, domains,
+  -- or CAs.
+  local info = get_blacklist_information(cert.subject, subjectAltNames)
+  local ca_info = get_blacklist_information(cert.issuer, nil)
+
+  if info == nil then
+    info = signatureBlacklist[stdnse.tohex(cert:digest("sha1"), { separator = "", group = 4 })]
+  end
+
+
+  return info, ca_info
+end
+
+local function check_dns(cert, host, subjectAltNames)
+  -- Check if the web server IP is the corresponding hostname IP
+  local ip = host.ip:match("[0-9]+.[0-9]+.[0-9]+.[0-9]+")
+
+  -- Check if the web server IP is present in the Subject Alternative Names 
+  if ip == nil then
+    for _, name in pairs(subjectAltNames) do
+      ip = name:match("[0-9]+.[0-9]+.[0-9]+.[0-9]+")
+      if ip ~= nil then
+        break
+      end
+    end
+  end
+
+  -- Check if any domainname in the Subject Alternative Names 
+  -- has a knonw ip address range
+  for _, name in pairs(subjectAltNames) do
+    if dnsRecords[name] ~= nil then
+      local range = dnsRecords[name]
+      if range ~= nil then
+        return true, ip_in_range(ip, range.min, range.max)
+      end
+      return false, false
+    end
+  end
+
+  return false, false
+end
+
+local function check_ciphersuite(cert)
+  local hashAlg, encAlg =  cert.sig_algorithm:match("^(.+)With(.+)Encryption$")
+  local secureHash = false
+  local secureEnc = encAlg == 'RSA' or encAlg == 'DSA' or encAlg == 'ECDSA' 
+  if hashAlg ~= nil and hashAlg:match("^sha(.+)$") then
+    local size = hashAlg:match("^sha([0-9]+)$")
+    secureHash = tonumber(size) >= 256
+  end
+
+  return secureHash and secureEnc
+end
 
 local function createSecurityReport(host, port, cert) 
 
-  cert.subject.altNames = extract_alternative_names(cert)
+  local subjectAltNames = extract_alternative_names(cert)
   loadedBlackList = load_blacklist(blacklistFile)
   loadedDNS = load_dns(dnsPath)
 
-  local is_selfsigned, is_verified = check_self_signed(cert)
-  if is_selfsigned then
-    securityReport.is_selfsigned = true
-    securityReport.is_verified = is_verified
-  else
-    -- Check the authenticity and issuance by the Certification Authority
-    securityReport.is_verified = check_authenticity(host, port, cert)
-  end
-
-  -- Check the Subject Alternative Name must contain the hostname or domain
-  -- name of the server, and if the Common Name field within the Subject field 
-  -- is used, it must match one of the entries in the Subject Alternative Name field.
-  local name_validity, cn_valid, idn_homograph_attack = check_name_validity(cert, host)
-  securityReport.name_validity = name_validity
-  securityReport.cn_valid = cn_valid
-
-  if idn_homograph_attack then
-    table.insert(securityReport.warnings, "WARNING: Potential Punycode/IDN Homograph Attack")
-  end
- 
   -- Check the Validity field to ensure the certificate is still within its
   -- valid date range
  
@@ -951,12 +942,37 @@ local function createSecurityReport(host, port, cert)
     table.insert(securityReport.warnings, warning)
   end
 
+  if securityReport.validity == CertValidity.EXPIRED then
+    local is_selfsigned, is_verified = check_self_signed(cert)
+    if is_selfsigned then
+      securityReport.is_selfsigned = true
+      securityReport.is_verified = is_verified
+    else
+      -- Check the authenticity and issuance by the Certification Authority
+      securityReport.is_verified = check_authenticity(host, port, cert)
+    end
+  else
+    securityReport.is_selfsigned = compare_subject_issuer(cert.subject, cert.issuer)
+    securityReport.is_verified = false 
+  end
+
+  -- Check the Subject Alternative Name must contain the hostname or domain
+  -- name of the server, and if the Common Name field within the Subject field 
+  -- is used, it must match one of the entries in the Subject Alternative Name field.
+  local name_validity, cn_valid, idn_homograph_attack = check_name_validity(cert, subjectAltNames, host)
+  securityReport.name_validity = name_validity
+  securityReport.cn_valid = cn_valid
+
+  if idn_homograph_attack then
+    table.insert(securityReport.warnings, "WARNING: Potential Punycode/IDN Homograph Attack")
+  end
+
   -- Check if the certificate's SubjectName or IssuerName (i.e., organization
   -- or common name) are found in the blacklist of malicious servers, domains,
   -- or CAs.
  
   if loadedBlackList then
-    local cert_blacklisted_info, ca_blacklisted_info = check_blacklisted(cert)
+    local cert_blacklisted_info, ca_blacklisted_info = check_blacklisted(cert, subjectAltNames)
     securityReport.is_blacklisted = cert_blacklisted_info ~= nil
     securityReport.blacklisted_info = cert_blacklisted_info
     securityReport.ca_is_blacklisted = ca_blacklisted_info ~= nil
@@ -966,7 +982,7 @@ local function createSecurityReport(host, port, cert)
   -- Checkif the web server IP is the corresponding hostname IP. 
   -- The hostname is usually included in Subject Alternative Name or Common Name.
 
-  local dns_resolved, ip_in_range = check_dns(cert, host)
+  local dns_resolved, ip_in_range = check_dns(cert, host, subjectAltNames)
   securityReport.dns_resolved = dns_resolved
   securityReport.ip_in_range = ip_in_range
 

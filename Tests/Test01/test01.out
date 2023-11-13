@@ -1,0 +1,64 @@
+# Nmap 7.91 scan initiated Mon Nov 13 10:45:13 2023 as: nmap -Pn -p443 --script untrustedX509certs.nse -v -oN test01.out 10.0.3.149
+Nmap scan report for 10.0.3.149
+Host is up (0.00050s latency).
+
+PORT    STATE SERVICE
+443/tcp open  https
+| untrustedX509certs: Subject: commonName=cyber.uc3m.es/organizationName=UC3M/stateOrProvinceName=MADRID/countryName=ES/organizationalUnitName=UC3M Cyber/localityName=GETAFE
+| Subject Alternative Name: DNS:cyber.uc3m.es, DNS:10.0.3.149
+| Issuer: commonName=cyber.uc3m.es/organizationName=UC3M/stateOrProvinceName=MADRID/countryName=ES/organizationalUnitName=UC3M Cyber/localityName=GETAFE
+| Public Key type: rsa
+| Public Key bits: 4096
+| Signature Algorithm: sha256WithRSAEncryption
+| Not valid before: 2023-11-13T14:29:30
+| Not valid after:  2024-11-12T14:29:30
+| MD5:   c148 87ce d7e8 ee98 d474 3982 8c73 62da
+| SHA-1: f5ea fed7 9eab 1dc0 35e6 5060 cb4d 1495 87a0 dd09
+| -----BEGIN CERTIFICATE-----
+| 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
+| mUkx5QCcAUe7awirAiBTGnw=
+| -----END CERTIFICATE-----
+| 
+| --------------------------------
+| CERTIFICATE SECURITY REPORT
+| --------------------------------
+| Self-signed: True
+| Certificate verified
+| Validity: Certificate is VALID
+| Certificate Subject Alternative Names contains hostname
+| Blacklisted: False
+| DNS resolved: True
+|_DNS: server ip is in a VALID RANGE
+
+Read data files from: /usr/bin/../share/nmap
+# Nmap done at Mon Nov 13 10:45:26 2023 -- 1 IP address (1 host up) scanned in 13.30 seconds

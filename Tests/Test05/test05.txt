@@ -1,0 +1,22 @@
+Authors: Javier Sande Ríos; Tristán Vaquero
+
+Description: Scan host with a valid and not blacklisted self-signed certificate with weak key (1024 bits) and not valid (expired).
+
+Input:
+	* list: blacklist.csv
+	* dns-list: dns.csv
+
+Output:
+	* Information about the certificate
+	* Self-signed: True
+	* Verified: False
+	* Validity: False (Expired)
+	* Valid names: True
+	* Blacklisted: False
+	* DNS resolved: True
+	* DNS: IP in valid range
+	* Warnings:
+		* Weak key
+
+Command: $ nmap -Pn -p443 10.0.3.149 --script untrustedX509certs.nse --script-args list=blacklist.csv dns-list=dns.csv -v -oN test05.txt
+
