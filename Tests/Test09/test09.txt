@@ -1,4 +1,4 @@
-Authors: Javier Sande Ríos; Tristán Vaquero
+Authors: Javier Sande Ríos; Tristán Vaquero Povedano
 
 Description: Scan host with a valid and with blacklisted subject Alternative Name and not known domain name.
 
@@ -10,7 +10,7 @@ Output:
 	* Information about the certificate
 	* Self-signed: True
 	* Verified: True
-	* Validity: False (Expired)
+	* Validity: True
 	* Valid names: False
 	* Blacklisted: True. Blacklisted subject
 	* DNS resolved: False

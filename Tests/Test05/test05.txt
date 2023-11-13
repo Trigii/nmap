@@ -1,4 +1,4 @@
-Authors: Javier Sande Ríos; Tristán Vaquero
+Authors: Javier Sande Ríos; Tristán Vaquero Povedano
 
 Description: Scan host with a valid and not blacklisted self-signed certificate with weak key (1024 bits) and not valid (expired).
 
