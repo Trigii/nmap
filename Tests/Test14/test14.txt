@@ -1,0 +1,19 @@
+Authors: Javier Sande Ríos; Tristán Vaquero
+
+Description: Scan host with a blacklisted issuer different from server CA.
+
+Input:
+	* list: blacklist.csv
+	* dns-list: dns.csv
+
+Output:
+	* Information about the certificate
+	* Self-signed: False
+	* Verified: False
+	* Validity: True
+	* Valid names: False
+	* Blacklisted: True
+	* DNS resolved: False
+
+Command: $ nmap -Pn -p443 10.0.3.149 --script untrustedX509certs.nse --script-args list=blacklist.csv dns-list=dns.csv -v -oN test13.out
+

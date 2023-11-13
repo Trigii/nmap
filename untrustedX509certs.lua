@@ -942,7 +942,7 @@ local function createSecurityReport(host, port, cert)
     table.insert(securityReport.warnings, warning)
   end
 
-  if securityReport.validity == CertValidity.EXPIRED then
+  if securityReport.validity ~= CertValidity.EXPIRED then
     local is_selfsigned, is_verified = check_self_signed(cert)
     if is_selfsigned then
       securityReport.is_selfsigned = true

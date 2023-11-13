@@ -1,0 +1,53 @@
+# Nmap 7.91 scan initiated Mon Nov 13 14:40:15 2023 as: nmap -Pn -p443 --script untrustedX509certs.nse --script-args list=blacklist.csv -v -oN test13.out 10.0.3.149 dns-list=dns.csv
+Failed to resolve "dns-list=dns.csv".
+Failed to resolve "dns-list=dns.csv".
+Nmap scan report for 10.0.3.149
+Host is up (0.00056s latency).
+
+PORT    STATE SERVICE
+443/tcp open  https
+| untrustedX509certs: Subject: commonName=10.0.3.149/organizationName=Internet Widgits Pty Ltd/stateOrProvinceName=MADRID/countryName=ES/organizationalUnitName=UC3M Cyber
+| Issuer: commonName=UC3M CA/organizationName=Internet Widgits Pty Ltd/stateOrProvinceName=MADRID/countryName=ES/organizationalUnitName=UC3M Cyber/localityName=GETAFE
+| Public Key type: rsa
+| Public Key bits: 1024
+| Signature Algorithm: sha1WithRSAEncryption
+| Not valid before: 2023-11-13T19:38:58
+| Not valid after:  2024-11-12T19:38:58
+| MD5:   8b66 97f7 fc40 4cc1 cfde e4a2 e06b f48e
+| SHA-1: 0c0c 4301 fb4f c5ae 4d1a 5a22 763e 8139 bd9c 1be6
+| -----BEGIN CERTIFICATE-----
+| MIIC1TCCAj6gAwIBAgIBATANBgkqhkiG9w0BAQUFADB5MQswCQYDVQQGEwJFUzEP
+| MA0GA1UECBMGTUFEUklEMQ8wDQYDVQQHEwZHRVRBRkUxITAfBgNVBAoTGEludGVy
+| bmV0IFdpZGdpdHMgUHR5IEx0ZDETMBEGA1UECxMKVUMzTSBDeWJlcjEQMA4GA1UE
+| AxMHVUMzTSBDQTAeFw0yMzExMTMxOTM4NThaFw0yNDExMTIxOTM4NThaMGsxCzAJ
+| BgNVBAYTAkVTMQ8wDQYDVQQIEwZNQURSSUQxITAfBgNVBAoTGEludGVybmV0IFdp
+| ZGdpdHMgUHR5IEx0ZDETMBEGA1UECxMKVUMzTSBDeWJlcjETMBEGA1UEAxMKMTAu
+| MC4zLjE0OTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA05PGe6l8NIMyJKha
+| 0pSF1dLxY4NNrgLTkdnfooWWMq6vNUFbWLDBbxxWYNGu9A7wRhenAa88EHqN/6Ew
+| qVmuK9r/pNrBuR3+gh/BGBavo0/VBLcv3u78N6Ma0p1H8v24yObPFer9Wx0LL+nZ
+| ZdHFYvTnfGN4xrQKGtaWe1kAB6cCAwEAAaN7MHkwCQYDVR0TBAIwADAsBglghkgB
+| hvhCAQ0EHxYdT3BlblNTTCBHZW5lcmF0ZWQgQ2VydGlmaWNhdGUwHQYDVR0OBBYE
+| FG2H7VzrA/VJAnfMPAN8I3ki9N3wMB8GA1UdIwQYMBaAFGiQlVJBJMKy1SkaNPUo
+| eBIlzgobMA0GCSqGSIb3DQEBBQUAA4GBAC4m0vKkwHJGefWUsFx6kqamWvZDmx0h
+| y0frTvZfDX1k8IjR+jag7q6a1CngvvxjbqwS+tH3nBAVZAIFfdYhHSMwOHRunA/J
+| nV//cMFna4RlaG35tvHvYBhPDlpddWRbcjx4n8zTMRicpaW4ecKo6fRe/mbzeECR
+| bSCuoqeAGW3n
+| -----END CERTIFICATE-----
+| 
+| --------------------------------
+| CERTIFICATE SECURITY REPORT
+| --------------------------------
+| Self-signed: False. Certificate issued by a Certification Authority.
+| Certificate verified
+| Validity: Certificate is VALID
+| Certificate Subject Alternative Names does not contain hostname
+| Certificate Subject Alternative Names does not contain Subject Common Name
+| Blacklisted: Certificate Subject is blacklisted: on 12/02/2020 with severity critical
+| Blacklisted: Certificate CA is blacklisted: on 12/02/2020 with severity critical
+| DNS resolved: False
+| WARNING: Public key size is too short (recomended 2048 or larger key)
+|_WARNING: signature algorithm is not strong (It should be RSA or DSA or ECDSA with SHA256 or stronger).
+
+Failed to resolve "dns-list=dns.csv".
+Read data files from: /usr/bin/../share/nmap
+# Nmap done at Mon Nov 13 14:40:28 2023 -- 1 IP address (1 host up) scanned in 13.28 seconds
