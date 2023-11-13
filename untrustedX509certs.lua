@@ -113,6 +113,7 @@ end
 
 -- Table to store the blacklist
 local issuerBlacklist = {}
+local signatureBlacklist = {}
 local loadedBlackList = false
 
 -- Table to store the dns records
@@ -142,6 +143,167 @@ local NON_VERBOSE_FIELDS = {
   "stateOrProvinceName",
   "countryName"
 }
+
+-------------------------------------------------------------------------------
+-- Report definition
+-------------------------------------------------------------------------------
+
+local securityReport = {}
+securityReport.is_blacklisted = false
+securityReport.ca_is_blacklisted = false
+securityReport.warnings = {}
+
+-------------------------------------------------------------------------------
+-- Parsermethods for Punycode/IDN Homograph Attack detection
+-- Obtained from: https://community.netwitness.com/t5/netwitness-community-blog/
+-- lua-parser-for-punycode-idn-homograph-attack/ba-p/517951
+-------------------------------------------------------------------------------
+
+local blacklist = {
+  0x251,  -- ɑ
+  0x3b1,  -- α
+  0x430,  -- а
+  0x42c,  -- Ь
+  0x3f2,  -- ϲ
+  0x441,  -- с
+  0x217d, -- ⅽ
+  0x501,  -- ԁ
+  0x217e, -- ⅾ
+  0x435,  -- е
+  0x261,  -- ɡ
+  0x4bb,  -- һ
+  0x456,  -- і
+  0x13a5, -- Ꭵ
+  0x2170, -- ⅰ 
+  0x3f3,  -- ϳ
+  0x458,  -- ј
+  0x575,  -- յ
+  0x39a,  -- Κ
+  0x217c, -- ⅼ
+  0x217f, -- ⅿ
+  0x4cf,  -- ӏ
+  0x3bf,  -- ο
+  0x43e,  -- о
+  0x1d0f, -- ᴏ
+  0x3c1,  -- ρ
+  0x440,  -- р
+  0x455,  -- ѕ
+  0x3c5,  -- υ
+  0x475,  -- ѵ
+  0x2174, -- ⅴ
+  0x461,  -- ѡ
+  0x1d21, -- ᴡ
+  0x445,  -- х
+  0x2179, -- ⅹ
+  0x3b3,  -- γ
+  0x443,  -- у
+}
+
+local blacklistSet = {}
+for i, c in ipairs(blacklist) do
+  blacklistSet[c] = true
+end
+
+-- Parameter values for Punycode: https://tools.ietf.org/html/rfc3492#section-5
+local base = 36
+local tmin = 1
+local tmax = 26
+local skew = 38
+local damp = 700
+local initial_bias = 72
+local initial_n = 128
+
+-- Bias Adaptation: https://tools.ietf.org/html/rfc3492#section-6.1
+local adapt = function(delta, numPoints, firstTime)
+  delta = firstTime and math.floor( delta / damp ) or math.floor( delta / 2 )
+  
+  delta = delta + math.floor( delta / numPoints )
+  
+  local k = 0
+  
+  while delta > math.floor(( base - tmin ) * tmax / 2) do
+    delta = math.floor( delta / ( base - tmin) )
+    k = k + 1
+  end
+  
+	return base * k + math.floor((base - tmin + 1) * delta / (delta + skew));
+end
+
+-- https://github.com/HalosGhost/lua-punycode/blob/master/src/punycode.lua
+local charToDigit = function (character)
+  local c = string.byte(character)
+  
+  local a = (c >= 65 and c <= 90) and c - 65 or
+        (c >= 97 and c <= 122) and c - 97 or
+        (c >= 48 and c <= 57) and c - 22 or c
+
+  return a
+end
+
+-- Decoding Procedure: https://tools.ietf.org/html/rfc3492#section-6.2
+local getUnicodeCodepoints = function (host)
+  local codepoints = { }
+  
+  if string.sub(host, 1, 4) ~= "xn--" then
+    return { }
+  end
+  
+  host = string.sub(host, 5)
+  
+  local last_delim = string.find(host, "-[^-]*$")
+  
+  local n = initial_n
+  local i = 0
+  local bias = initial_bias
+  local output = last_delim and string.sub(host, 0, last_delim - 1) or ""
+  local extended = last_delim and string.sub(host, last_delim + 1) or host
+  
+  while string.len(extended) > 0 do
+    local oldi = i
+    local w = 1
+    for k = base, math.huge, base do
+      local digit = charToDigit(string.sub(extended,1,1))
+      extended = string.sub(extended, 2)
+      
+      i = i + digit * w
+      local t = (k <= bias) and tmin or
+                (k >= bias + tmax) and tmax or
+                (k - bias)
+      if digit < t then
+        break
+      end
+      w = w * (base - t)
+    end
+    bias = adapt(i - oldi, string.len(output) + 1, oldi == 0)
+    n = n + math.floor( i / (string.len(output) + 1) )
+    i = i % (string.len(output) + 1)
+    codepoints[#codepoints + 1] = n
+    output = string.sub(output,1,i) .. " " .. string.sub(output,i+1)
+    i = i + 1
+  end
+  
+  return codepoints
+  --return output
+end
+
+local function check(host)
+  local blacklistHit = 0
+  local unicodeCount = 0
+  
+  for domain in string.gmatch(host, "[^.]+") do
+    local out = getUnicodeCodepoints(domain)
+    unicodeCount = unicodeCount + #out
+    
+    for k, v in ipairs(out) do
+      
+      if blacklistSet[v] then
+        blacklistHit = blacklistHit + 1
+      end
+    end
+  end
+ 
+  return unicodeCount > 0 and blacklistHit > 0 and blacklistHit/unicodeCount >= 0.75
+end
 
 -------------------------------------------------------------------------------
 -- UTIL functions
@@ -206,9 +368,13 @@ local function load_blacklist(file)
   end
 
   for line in file_handle:lines() do
-    local date, issuer, severity = line:match("([^;]+);([^;]+);([^;]+)")
+    local date, issuer, severity, fingerprint = line:match("([^;]+);([^;]+);([^;]+);([^;]+)")
     if date and issuer and severity then
       issuerBlacklist[issuer] = {
+        severity = severity,
+        inclusion_date = date
+      }
+      signatureBlacklist[fingerprint] = {
         severity = severity,
         inclusion_date = date
       }
@@ -254,26 +420,6 @@ local function compare_subject_issuer(subject, issuer)
   return true
 end
 
-
--- Check if a name is in the blacklist
-local function is_issuer_blacklisted(names)
-  if issuerBlacklist[names.commonName] ~= nil then
-    return true
-  elseif issuerBlacklist[names.organizationName] ~= nil then
-    return true
-  end
-
-  if names.altNames ~= nil then
-    for _, altName in ipairs(names.altNames) do
-      if issuerBlacklist[altName] ~= nil then
-        return true
-      end
-    end
-  end
-
-  return false
-end
-
 -- Retrieve inforamtion (date and severity) about the blacklisted name entry
 local function get_blacklist_information(names)
   if issuerBlacklist[names.commonName] ~= nil then
@@ -282,9 +428,11 @@ local function get_blacklist_information(names)
     return issuerBlacklist[names.organizationName]
   end
 
-  for _, altName in ipairs(names.altNames) do
-    if issuerBlacklist[altName] ~= nil then
-      return issuerBlacklist[altName]
+  if names.altNames ~= nil then
+    for _, altName in ipairs(names.altNames) do
+      if issuerBlacklist[altName] ~= nil then
+        return issuerBlacklist[altName]
+      end
     end
   end
 
@@ -321,41 +469,6 @@ function transform_cert_dn(cert)
   return transformed_dn
 end
 
-function check_authenticity(host, port, cert)
-  local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
-  local handle = io.popen(cmd)
-  local certificate_chain = handle:read("*a")
-  handle:close()
-  
-  local temp_cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
-  local ca_subject, _, ca_cert = temp_cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
-
-  -- Check the Issuer field in the server certificate should match the Subject 
-  -- field of the CA certificate
-  print("-----------AUTHENTICITY-----------")
-  print(transform_cert_dn(ca_subject))
-  ca_subject_table = transform_cert_dn(ca_subject)
-  if(compare_subject_issuer(ca_subject_table, cert.issuer)) then
-    verify_authenticity = true
-    print(verify_authenticity)
-  end
-  
-  -- Check the signature on the server certificate is valid and has been signed
-  -- by the private key of the CA.
-  local file = io.open("ca_cert.pem", "w")
-  file:write(ca_cert)
-  file:close()
-
-  local file = io.open("server_cert.pem", "w")
-  file:write(string.format("%s", cert.pem))
-  file:close()
-
-  local handle = io.popen("openssl verify -CAfile ca_cert.pem server_cert.pem")
-  local verify_output = handle:read("*a")
-  print(verify_output)
-  verify_issuance = string.match(verify_output, "OK")
-  handle:close()
-end
 
 -------------------------------------------------------------------------------
 -- OUTPUT funcitons (based on ssl-cert.nse)
@@ -467,6 +580,18 @@ local function output_tab(cert)
   o.md5 = stdnse.tohex(cert:digest("md5"))
   o.sha1 = stdnse.tohex(cert:digest("sha1"))
   o.pem = cert.pem
+
+  o.securityReport = {}
+  o.securityReport.self_signed = securityReport.is_selfsigned
+  o.securityReport.verified = securityReport.verified
+  o.securityReport.validity = securityReport.validity
+  o.securityReport.hostname_included =securityReport.name_validity
+  o.securityReport.common_name_included = securityReport.cn_valid
+  o.securityReport.subject_blacklisted = securityReport.is_blacklisted
+  o.securityReport.subject_blacklisted_info = securityReport.blacklisted_info
+  o.securityReport.issuer_blacklisted = securityReport.ca_is_blacklisted
+  o.securityReport.issuer_blacklisted_info = securityReport.ca_blacklisted_info
+  o.securityReport.warnings = securityReport.warnings
   return o
 end
 
@@ -508,22 +633,71 @@ end
 --  of the server, and if the Common Name field within the Subject field is
 -- used, it must match one of the entries in the Subject Alternative Name field
 local function check_name_validity(cert, host)
-  if cert.subject.commonName ~= nil then
-    for _,name in pairs(cert.subject.altNames) do
-      if v == cert.subject.commonName then
-        return true, ""
-      end
+  local hostPresent = false
+  local cnPresent = cert.subject.commonName == nil
+  local idn_homograph_attack = false
+
+  for _, name in pairs(cert.subject.altNames) do
+    if name == host then
+      hostPresent = true
     end
-    return false, "Common Name is not present in the Alternative Name field"
+
+    if check(name) then
+      idn_homograph_attack = true
+    end
   end
 
-  return true, ""
+  if cert.subject.commonName ~= nil then
+    for _, name in pairs(cert.subject.altNames) do
+      if name == cert.subject.commonName then
+        cnPresent = true
+      end
+    end
+  end
+
+  return hostPresent, cnPresent
 end
 
 
 -- Verify the signature
 function verify_signature(cert, publicKey)
   return openssl.verify(publicKey, cert.pem, cert.sig_algorithm)
+end
+
+function check_authenticity(host, port, cert)
+  local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
+  local handle = io.popen(cmd)
+  local certificate_chain = handle:read("*a")
+  handle:close()
+  
+  local temp_cert = certificate_chain:match("(1 s:[^\n]*\n *i:[^\n]*\n[-]+BEGIN CERTIFICATE[-]+[^-]*[-]+END CERTIFICATE[-]+)")
+  local ca_subject, _, ca_cert = temp_cert:match("[0-9]+ s:(.*)\n *i:(.*)\n([-]+BEGIN CERTIFICATE.*END CERTIFICATE[-]*)")
+
+  -- Check the Issuer field in the server certificate should match the Subject 
+  -- field of the CA certificate
+  print("-----------AUTHENTICITY-----------")
+  print(transform_cert_dn(ca_subject))
+  ca_subject_table = transform_cert_dn(ca_subject)
+  if(compare_subject_issuer(ca_subject_table, cert.issuer)) then
+    verify_authenticity = true
+    print(verify_authenticity)
+  end
+  
+  -- Check the signature on the server certificate is valid and has been signed
+  -- by the private key of the CA.
+  local file = io.open("ca_cert.pem", "w")
+  file:write(ca_cert)
+  file:close()
+
+  local file = io.open("server_cert.pem", "w")
+  file:write(string.format("%s", cert.pem))
+  file:close()
+
+  local handle = io.popen("openssl verify -CAfile ca_cert.pem server_cert.pem")
+  local verify_output = handle:read("*a")
+  print(verify_output)
+  verify_issuance = string.match(verify_output, "OK")
+  handle:close()
 end
 
 local function check_self_signed(cert)
@@ -538,19 +712,20 @@ local function check_self_signed(cert)
 end
 
 -- Check if the certificate's SubjectName or IssuerName (i.e., organization or
--- common name) 
--- are found in the blacklist of malicious servers, domains, or CAs.
+-- common name) or fingerprint (SHA1) are found in the blacklist of malicious servers, domains, or CAs.
 
-local function check_blacklisted(names)
+local function check_blacklisted(cert)
   -- Check if names are found in the blacklist of malicious servers, domains,
   -- or CAs.
+  local info = get_blacklist_information(cert.subject)
+  local ca_info = get_blacklist_information(cert.issuer)
 
-  if is_issuer_blacklisted(names) then
-    local info = get_blacklist_information(names)
-    return true, info
+  if info == nil then
+    info = signatureBlacklist[stdnse.tohex(cert:digest("sha1"), { separator = "", group = 4 })]
   end
 
-  return false, nil
+
+  return info, ca_info
 end
 
 local function check_dns(cert)
@@ -619,55 +794,55 @@ local function output_str(cert)
   lines[#lines + 1] = "CERTIFICATE SECURITY WARNINGS"
   lines[#lines + 1] = "--------------------------------"
 
-  -- Check the authenticity and issuance by the Certification Authority
-
-  cert.subject.altNames = extract_alternative_names(cert)
-
-  -- local verify_ca, is_verified = check_authenticity(cert)
-  -- lines[#lines + 1] = "Certificate authenticity and issuance by the Certification Authority:"
-  -- lines[#lines + 1] = "Authenticity -> " .. string.format("%s", verify_authenticity)
-  -- lines[#lines + 1] = "Server Valid Signature -> " .. string.format("%s", verify_signature(cert, cert.pubkey))
-  -- lines[#lines + 1] = "Issuance: -> " .. string.format("%s", verify_issuance)
-
-  -- Check the Validity field to ensure the certificate is still within its
-  -- valid date range
-
-  local validity, warning = check_validity(cert)
-  if validity == CertValidity.VALID then
-    lines[#lines + 1] = "Validity: OK"
-    if warning ~= nil then
-      lines[#lines + 1] = warning
-    end
+  if securityReport.is_selfsigned then
+    lines[#lines + 1] = "Self-signed: True"
   else
-    lines[#lines + 1] = "Validity: Certificate not valid"
-    if validity == CertValidity.EXPIRED then
+    lines[#lines + 1] = "Self-signed: False. Certificate issued by a Certification Authority."
+  end
+
+  if securityReport.verified then
+    lines[#lines + 1] = "Certificate verified"
+  else
+    lines[#lines + 1] = "Certificate cannot be verified"
+  end
+
+  if securityReport.validity == CertValidity.VALID then
+    lines[#lines + 1] = "Validity: Certificate is VALID"
+  else
+    lines[#lines + 1] = "Validity: Certificate is NOT VALID"
+    if securityReport.validity == CertValidity.EXPIRED then
       lines[#lines + 1] = "Validity: Certificate exprired on " .. 
       date_to_string(cert.validity.notAfter)
-    elseif authenticity == CertValidity.NOT_YET_VALID then
+    elseif securityReport.validity == CertValidity.NOT_YET_VALID then
       lines[#lines + 1] = "Validity: Certificate not valid before " .. 
       date_to_string(cert.validity.notBefore)
     end
   end
 
+  if securityReport.name_validity then
+    lines[#lines + 1] = "Certificate Subject Alternative Names contains hostname"
+  else
+    lines[#lines + 1] = "Certificate Subject Alternative Names does not contain hostname"
+  end
 
-  -- Check if the certificate's SubjectName or IssuerName (i.e., organization
-  -- or common name) are found in the blacklist of malicious servers, domains,
-  -- or CAs.
+  if not securityReport.cn_valid then
+    lines[#lines + 1] = "Certificate Subject Alternative Names does not contain Subject Common Name"
+  end
 
   if loadedBlackList then
-    local cert_is_blacklisted, info = check_blacklisted(cert.subject)
-    if cert_is_blacklisted then
-      lines[#lines + 1] = "Blacklisted: Certificate Subject is blacklisted: on " 
-      .. info.inclusion_date .. " with severity " .. info.severity
-    end
-  
-    local ca_is_blacklisted, info = check_blacklisted(cert.issuer)
-    if ca_is_blacklisted then
-      lines[#lines + 1] = "Blacklisted: Certificate CA is blacklisted: on " 
-      .. info.inclusion_date .. " with severity " .. info.severity
+    if securityReport.is_blacklisted then
+      lines[#lines + 1] = "Blacklisted: Certificate Subject is blacklisted: on " ..
+      securityReport.blacklisted_info.inclusion_date ..
+      " with severity " .. securityReport.blacklisted_info.severity
     end
 
-    if not cert_is_blacklisted and not ca_is_blacklisted then
+    if securityReport.ca_is_blacklisted then
+      lines[#lines + 1] = "Blacklisted: Certificate CA is blacklisted: on " ..
+      securityReport.ca_blacklisted_info.inclusion_date ..
+      " with severity " .. securityReport.ca_blacklisted_info.severity
+    end
+
+    if not securityReport.is_blacklisted and not securityReport.ca_is_blacklisted then
       lines[#lines + 1] = "Blacklisted: False"
     end
 
@@ -675,31 +850,71 @@ local function output_str(cert)
     lines[#lines + 1] = "Blacklist could not be loaded. Subejct and Issuer cannot be checked."
   end
 
-  local is_selfsigned, is_verified = check_self_signed(cert)
-  if is_selfsigned then
-    lines[#lines + 1] = "Self-signed: True"
-    if not is_verified then
-      lines[#lines + 1] = "Certificate cannot be verified"
-    else
-      lines[#lines + 1] = "Certificate verified"
-    end
-  else
-    lines[#lines + 1] = "Self-signed: False"
+  for _, warning in ipairs(securityReport.warnings) do
+    lines[#lines + 1] = warning
   end
 
+  return table.concat(lines, "\n")
+end
+
+local function createSecurityReport(host, port, cert) 
+
+  cert.subject.altNames = extract_alternative_names(cert)
+  loadedBlackList = load_blacklist(blacklistFile)
+  loadedDNS = load_dns(dnsPath)
+
+  local is_selfsigned, is_verified = check_self_signed(cert)
+  if is_selfsigned then
+    securityReport.is_selfsigned = true
+    securityReport.is_verified = is_verified
+  else
+    -- Check the authenticity and issuance by the Certification Authority
+    securityReport.is_verified = check_authenticity(host, port, cert)
+  end
+
+  -- Check the Subject Alternative Name must contain the hostname or domain
+  -- name of the server, and if the Common Name field within the Subject field 
+  -- is used, it must match one of the entries in the Subject Alternative Name field.
+  local name_validity, cn_valid, idn_homograph_attack = check_name_validity(cert, host)
+  securityReport.name_validity = name_validity
+  securityReport.cn_valid = cn_valid
+
+  if idn_homograph_attack then
+    table.insert(securityReport.warnings, "WARNING: Potential Punycode/IDN Homograph Attack")
+  end
+ 
+  -- Check the Validity field to ensure the certificate is still within its
+  -- valid date range
+ 
+  local validity, warning = check_validity(cert)
+  securityReport.validity = validity
+  if warning ~= nil then
+    table.insert(securityReport.warnings, warning)
+  end
+
+  -- Check if the certificate's SubjectName or IssuerName (i.e., organization
+  -- or common name) are found in the blacklist of malicious servers, domains,
+  -- or CAs.
+ 
+  if loadedBlackList then
+    local cert_blacklisted_info, ca_blacklisted_info = check_blacklisted(cert)
+    securityReport.is_blacklisted = cert_blacklisted_info ~= nil
+    securityReport.blacklisted_info = cert_blacklisted_info
+    securityReport.ca_is_blacklisted = ca_blacklisted_info ~= nil
+    securityReport.ca_blacklisted_info = ca_blacklisted_info
+  end
+ 
   -- Issue a warning if the key length of public key is less than 2048 bits.
   if cert.pubkey.bits < 2048 then
-    lines[#lines + 1] = "WARNING: Public key size is too short (recomended 2048 or larger key)"
+    table.insert(securityReport.warnings, "WARNING: Public key size is too short (recomended 2048 or larger key)")
   end
 
   -- Issue a warning if the signature algorithm is not strong. It should be RSA
   -- or DSA or ECDSA with SHA256 or stronger.
 
   if not check_ciphersuite(cert) then
-    lines[#lines + 1] = "WARNING: signature algorithm is not strong (It should be RSA or DSA or ECDSA with SHA256 or stronger)."
+    table.insert(securityReport.warnings, "WARNING: signature algorithm is not strong (It should be RSA or DSA or ECDSA with SHA256 or stronger).")
   end
-
-  return table.concat(lines, "\n")
 end
 
 action = function(host, port)
@@ -710,9 +925,7 @@ action = function(host, port)
     return
   end
 
-  loadedBlackList = load_blacklist(blacklistFile)
-  loadedDNS = load_dns(dnsPath)
-  check_authenticity(host, port, cert)
+  createSecurityReport(host, port, cert)
 
   return output_tab(cert), output_str(cert)
 end
