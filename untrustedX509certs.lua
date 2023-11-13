@@ -350,8 +350,10 @@ local function load_dns(file)
   for line in file_handle:lines() do
     local domaninName, ipRange = line:match("([^;]+);([^;]+))")
     if domaninName and ipRange then
+     local min, max = ipRange:match("([^-]+)-([^-]+))")
       dnsRecords[domaninName] = {
-        range = ipRange
+        min = min,
+        max = max
       }
     end
   end
@@ -440,7 +442,7 @@ local function get_blacklist_information(names)
 end
 
 -- Function to transform the certificate DN
-function transform_cert_dn(cert)
+local function transform_cert_dn(cert)
   local transformed_dn = {}
   
   -- Mapping of keys from the first format to the second format
@@ -469,7 +471,14 @@ function transform_cert_dn(cert)
   return transformed_dn
 end
 
+-- Function to check if an ip is in a given range
+local function ip_in_range(ip, min, max)
+  local ipNum = socket.inet_pton(ip)
+  local minNum = socket.inet_pton(min)
+  local maxNum = socket.inet_pton(max)
 
+  return ipNum >= minNum and ipNum <= maxNum
+end
 -------------------------------------------------------------------------------
 -- OUTPUT funcitons (based on ssl-cert.nse)
 -------------------------------------------------------------------------------
@@ -591,6 +600,8 @@ local function output_tab(cert)
   o.securityReport.subject_blacklisted_info = securityReport.blacklisted_info
   o.securityReport.issuer_blacklisted = securityReport.ca_is_blacklisted
   o.securityReport.issuer_blacklisted_info = securityReport.ca_blacklisted_info
+  o.securityReport.dns_resolved = securityReport.dns_resolved
+  o.securityReport.ip_in_range = securityReport.ip_in_range
   o.securityReport.warnings = securityReport.warnings
   return o
 end
@@ -638,7 +649,7 @@ local function check_name_validity(cert, host)
   local idn_homograph_attack = false
 
   for _, name in pairs(cert.subject.altNames) do
-    if name == host then
+    if name == host.ip then
       hostPresent = true
     end
 
@@ -728,8 +739,30 @@ local function check_blacklisted(cert)
   return info, ca_info
 end
 
-local function check_dns(cert)
+local function check_dns(cert, host)
   -- Check if the web server IP is the corresponding hostname IP
+  local ip = host.ip:match("[0-9]+.[0-9]+.[0-9]+.[0-9]+")
+
+  -- Check if the web server IP is present in the Subject Alternative Names 
+  if ip == nil then
+    for _, name in pairs(cert.subject.altNames) do
+      ip = name:match("[0-9]+.[0-9]+.[0-9]+.[0-9]+")
+      if ip ~= nil then
+        break
+      end
+    end
+  end
+
+  -- Check if any domainname in the Subject Alternative Names 
+  -- has a knonw ip address range
+  for _, name in pairs(cert.subject.altNames) do
+    if dnsRecords[name] ~= nil then
+      local min, max = dnsRecords[name]
+      return true, ip_in_range(ip, min, max)
+    end
+  end
+
+  return false, false
 end
 
 local function check_ciphersuite(cert)
@@ -850,6 +883,17 @@ local function output_str(cert)
     lines[#lines + 1] = "Blacklist could not be loaded. Subejct and Issuer cannot be checked."
   end
 
+  if securityReport.dns_resolved then 
+    lines[#lines + 1] = "DNS resolved: True"
+    if securityReport.ip_in_range then
+      lines[#lines + 1] = "DNS: server ip is in a VALID RANGE"
+    else
+      lines[#lines + 1] = "DNS: server ip is NOT IN A VALID RANGE"
+    end
+  else
+    lines[#lines + 1] = "DNS resolved: False"
+  end
+
   for _, warning in ipairs(securityReport.warnings) do
     lines[#lines + 1] = warning
   end
@@ -903,7 +947,14 @@ local function createSecurityReport(host, port, cert)
     securityReport.ca_is_blacklisted = ca_blacklisted_info ~= nil
     securityReport.ca_blacklisted_info = ca_blacklisted_info
   end
- 
+
+  -- Checkif the web server IP is the corresponding hostname IP. 
+  -- The hostname is usually included in Subject Alternative Name or Common Name.
+
+  local dns_resolved, ip_in_range = check_dns(cert, host)
+  securityReport.dns_resolved = dns_resolved
+  securityReport.ip_in_range = ip_in_range
+
   -- Issue a warning if the key length of public key is less than 2048 bits.
   if cert.pubkey.bits < 2048 then
     table.insert(securityReport.warnings, "WARNING: Public key size is too short (recomended 2048 or larger key)")
