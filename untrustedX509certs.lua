@@ -120,10 +120,6 @@ local loadedBlackList = false
 local dnsRecords = {}
 local loadedDNS= false
 
--- Variables to store the CA certificate
-local verify_authenticity = false
-local verify_issuance = false
-
 -------------------------------------------------------------------------------
 -- ENUM definitions
 -------------------------------------------------------------------------------
@@ -348,9 +344,9 @@ local function load_dns(file)
   end
 
   for line in file_handle:lines() do
-    local domaninName, ipRange = line:match("([^;]+);([^;]+))")
+    local domaninName, ipRange = line:match("([^;]+);([^;]+)")
     if domaninName and ipRange then
-     local min, max = ipRange:match("([^-]+)-([^-]+))")
+     local min, max = ipRange:match("([^-]+)-([^-]+)")
       dnsRecords[domaninName] = {
         min = min,
         max = max
@@ -411,12 +407,6 @@ local function compare_subject_issuer(subject, issuer)
 
   if subject.stateOrProvinceName ~= issuer.stateOrProvinceName then
     return false
-  end
-
-  for i, _ in ipairs(subject.altNames) do
-    if subject.altNames[i] ~= issuer.altNames[i] then 
-      return false
-    end
   end
 
   return true
@@ -643,16 +633,17 @@ end
 -- Check the Subject Alternative Name must contain the hostname or domain name
 --  of the server, and if the Common Name field within the Subject field is
 -- used, it must match one of the entries in the Subject Alternative Name field
-local function check_name_validity(cert, host)
+local function check_name_validity(cert, hostname)
   local hostPresent = false
   local cnPresent = cert.subject.commonName == nil
   local idn_homograph_attack = false
 
   for _, name in pairs(cert.subject.altNames) do
-    if name == host.ip then
+    if name == hostname.ip then
       hostPresent = true
     end
 
+    -- Detect possible IDN Homograph attack on alternative names
     if check(name) then
       idn_homograph_attack = true
     end
@@ -670,12 +661,27 @@ local function check_name_validity(cert, host)
 end
 
 
--- Verify the signature
-function verify_signature(cert, publicKey)
-  return openssl.verify(publicKey, cert.pem, cert.sig_algorithm)
+-- Verify the signature of self-signed certificate
+function verify_signature(cert)
+  local is_verified = false
+  local file = io.open("server.pem", "w")
+  file:write(string.format("%s", cert.pem))
+  file:close()
+
+  local handle = io.popen("openssl verify -CAfile server.pem server.pem")
+  local verify_output = handle:read("*a")
+  is_selfsigned = string.match(verify_output, "OK")
+  if is_selfsigned == "OK" then
+    is_verified = true
+  end
+  handle:close()
+  print(is_verified)
+  return is_verified
 end
 
 function check_authenticity(host, port, cert)
+  local verify_authenticity = false
+  local verify_issuance = false
   local cmd = ("echo | openssl s_client -showcerts -connect %s:%s"):format(host.ip, port.number)
   local handle = io.popen(cmd)
   local certificate_chain = handle:read("*a")
@@ -707,15 +713,24 @@ function check_authenticity(host, port, cert)
   local handle = io.popen("openssl verify -CAfile ca_cert.pem server_cert.pem")
   local verify_output = handle:read("*a")
   print(verify_output)
-  verify_issuance = string.match(verify_output, "OK")
   handle:close()
+  local issuance = string.match(verify_output, "OK")
+  if issuance == "OK" then
+    verify_issuance = true
+  end
+
+  if verify_authenticity == true and verify_issuance == true then
+    return true
+  else
+    return false
+  end
 end
 
 local function check_self_signed(cert)
   -- SubjectName's CN is equal to IssuerName's CN
   if compare_subject_issuer(cert.subject, cert.issuer) then
     -- Check if the subject key can be used to validate the signature
-    is_verified = verify_signature(cert, cert.pubkey)
+    is_verified = verify_signature(cert)
     return true, is_verified
   else
     return false, false
@@ -824,7 +839,7 @@ local function output_str(cert)
   -- Security information
   ------------------------------------------
   lines[#lines + 1] = "--------------------------------"
-  lines[#lines + 1] = "CERTIFICATE SECURITY WARNINGS"
+  lines[#lines + 1] = "CERTIFICATE SECURITY REPORT"
   lines[#lines + 1] = "--------------------------------"
 
   if securityReport.is_selfsigned then
@@ -833,7 +848,7 @@ local function output_str(cert)
     lines[#lines + 1] = "Self-signed: False. Certificate issued by a Certification Authority."
   end
 
-  if securityReport.verified then
+  if securityReport.is_verified then
     lines[#lines + 1] = "Certificate verified"
   else
     lines[#lines + 1] = "Certificate cannot be verified"
